@@ -34,10 +34,16 @@ function AuthPage({ navigate, onAuthed }) {
     finally { setLoading(false); }
   }
 
-  function quickDemo() {
-    setEmail('demo@routeflow.app');
-    setPassword('demo123');
-    setFullName('Alex Driver');
+  function quickDemo(role = 'driver') {
+    if (role === 'admin') {
+      setEmail('admin@routeflow.app');
+      setPassword('admin12345');
+      setFullName('Manager Admin');
+    } else {
+      setEmail('demo@routeflow.app');
+      setPassword('demo123');
+      setFullName('Alex Driver');
+    }
     setTab('signin');
     setTimeout(() => document.getElementById('auth-submit')?.click(), 50);
   }
@@ -86,11 +92,16 @@ function AuthPage({ navigate, onAuthed }) {
         </form>
 
         <div className="divider"></div>
-        <button className="btn btn-secondary btn-block" onClick={quickDemo}>
-          <I.Sparkles size={14} /> Try the demo
-        </button>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <button type="button" className="btn btn-secondary btn-block" onClick={() => quickDemo('driver')}>
+            <I.Sparkles size={14} /> Driver demo
+          </button>
+          <button type="button" className="btn btn-secondary btn-block" onClick={() => quickDemo('admin')}>
+            <I.Shield size={14} /> Admin demo
+          </button>
+        </div>
         <div className="text-xs text-muted mt-4" style={{ textAlign: 'center' }}>
-          Local-first preview — data stored on this device.
+          Real Supabase backend · Postgres + Auth + Realtime · RLS-isolated per user.
         </div>
       </div>
       <button onClick={() => navigate('landing')} className="btn btn-ghost btn-sm" style={{ position: 'absolute', top: 20, left: 20 }}>

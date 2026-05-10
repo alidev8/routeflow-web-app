@@ -30,7 +30,13 @@ const useToast = () => React.useContext(ToastCtx);
 
 // --- Sidebar ---
 function Sidebar({ user, route, navigate, open, onClose, onSignOut }) {
-  const items = [
+  const isAdmin = !!user?.isAdmin;
+  const items = isAdmin ? [
+    { key: 'admin', label: 'Operations', icon: I.Home },
+    { key: 'admin-users', label: 'Drivers', icon: I.Sparkles },
+    { key: 'admin-trips', label: 'All Trips', icon: I.Layers },
+    { key: 'settings', label: 'Settings', icon: I.Settings },
+  ] : [
     { key: 'dashboard', label: 'Dashboard', icon: I.Home },
     { key: 'create-trip', label: 'Create Trip', icon: I.Plus },
     { key: 'analytics', label: 'Analytics', icon: I.ChartBar },
@@ -43,6 +49,7 @@ function Sidebar({ user, route, navigate, open, onClose, onSignOut }) {
         <div className="sidebar-brand">
           <div className="sidebar-brand-mark"><I.Route size={18} stroke="#fff" /></div>
           <div className="sidebar-brand-name">RouteFlow</div>
+          {isAdmin && <span className="role-badge role-badge-admin">Admin</span>}
         </div>
         {items.map((it) => {
           const Ico = it.icon;
@@ -57,7 +64,7 @@ function Sidebar({ user, route, navigate, open, onClose, onSignOut }) {
         <div className="sidebar-foot">
           <div className="avatar">{(user?.fullName || user?.email || '?').slice(0, 1).toUpperCase()}</div>
           <div className="user-meta flex-1">
-            <div className="user-name">{user?.fullName || 'Driver'}</div>
+            <div className="user-name">{user?.fullName || (isAdmin ? 'Manager' : 'Driver')}</div>
             <div className="user-email">{user?.email}</div>
           </div>
           <button className="icon-btn" onClick={onSignOut} title="Sign out" style={{ width: 32, height: 32 }}>

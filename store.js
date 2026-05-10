@@ -140,6 +140,8 @@
       fullName: profile?.full_name || session.user.user_metadata?.full_name || (session.user.email || '').split('@')[0],
       units: profile?.units || 'metric',
       dataSaver: !!profile?.data_saver,
+      role: profile?.role || 'user',
+      isAdmin: profile?.role === 'admin',
       createdAt: session.user.created_at,
     };
     setupChannels(currentUser.id);
@@ -565,6 +567,124 @@
     await refreshAll();
   }
 
+  // ---------- Admin (RLS allows cross-user access only when profile.role='admin') ----------
+  function requireAdmin() {
+    if (!currentUser?.isAdmin) throw new Error('Admin access required');
+  }
+
+  async function adminFetchUsers() {
+    requireAdmin();
+    // Trips per user + last activity, joined client-side from two queries.
+    const [{ data: profiles, error: pe }, { data: tripCounts, error: te }, { data: actLast, error: ae }] = await Promise.all([
+      sb.from('profiles').select('id, email, full_name, role, units, created_at, updated_at').order('created_at', { ascending: true }),
+      sb.from('trips').select('user_id, status'),
+      sb.from('activity').select('user_id, created_at').order('created_at', { ascending: false }),
+    ]);
+    if (pe || te || ae) throw new Error((pe || te || ae).message);
+    const byUser = {};
+    (tripCounts || []).forEach((t) => {
+      const u = (byUser[t.user_id] ||= { total: 0, active: 0, completed: 0 });
+      u.total += 1;
+      if (t.status === 'completed') u.completed += 1;
+      else if (t.status === 'in-progress' || t.status === 'optimised' || t.status === 'optimising') u.active += 1;
+    });
+    const lastSeen = {};
+    (actLast || []).forEach((a) => { if (!lastSeen[a.user_id]) lastSeen[a.user_id] = a.created_at; });
+    return (profiles || []).map((p) => ({
+      id: p.id,
+      email: p.email,
+      fullName: p.full_name,
+      role: p.role,
+      units: p.units,
+      createdAt: p.created_at,
+      lastActiveAt: lastSeen[p.id] || null,
+      tripsTotal: byUser[p.id]?.total || 0,
+      tripsActive: byUser[p.id]?.active || 0,
+      tripsCompleted: byUser[p.id]?.completed || 0,
+    }));
+  }
+
+  async function adminFetchAllTrips(limit = 50) {
+    requireAdmin();
+    const { data: rows, error } = await sb
+      .from('trips')
+      .select('*, profiles!inner(full_name, email)')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(error.message);
+    if (!rows?.length) return [];
+    const ids = rows.map((t) => t.id);
+    const { data: stopRows } = await sb.from('stops').select('*').in('trip_id', ids).order('sequence', { ascending: true });
+    const stopsByTrip = (stopRows || []).reduce((acc, s) => { (acc[s.trip_id] ||= []).push(s); return acc; }, {});
+    return rows.map((r) => {
+      const t = dbTrip(r, stopsByTrip[r.id]);
+      t.driverName = r.profiles?.full_name || 'Unknown';
+      t.driverEmail = r.profiles?.email || null;
+      t.userId = r.user_id;
+      return t;
+    });
+  }
+
+  async function adminFetchActivity(limit = 100) {
+    requireAdmin();
+    const { data, error } = await sb
+      .from('activity')
+      .select('id, type, title, meta, trip_id, user_id, created_at, profiles!inner(full_name, email)')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(error.message);
+    return (data || []).map((a) => ({
+      id: a.id,
+      type: a.type,
+      title: a.title,
+      meta: a.meta,
+      tripId: a.trip_id,
+      userId: a.user_id,
+      driverName: a.profiles?.full_name || 'Unknown',
+      driverEmail: a.profiles?.email || null,
+      ts: a.created_at,
+    }));
+  }
+
+  async function adminStats() {
+    requireAdmin();
+    const [users, trips, stops, todayActivity] = await Promise.all([
+      sb.from('profiles').select('id', { count: 'exact', head: true }),
+      sb.from('trips').select('status, total_distance_km, total_time_min, time_saved_min'),
+      sb.from('stops').select('status', { count: 'exact', head: true }),
+      sb.from('activity').select('id', { count: 'exact', head: true }).gte('created_at', new Date(Date.now() - 86400000).toISOString()),
+    ]);
+    const tripsArr = trips.data || [];
+    const completed = tripsArr.filter((t) => t.status === 'completed').length;
+    const active = tripsArr.filter((t) => t.status === 'in-progress' || t.status === 'optimised' || t.status === 'optimising').length;
+    const totalKm = tripsArr.reduce((a, t) => a + Number(t.total_distance_km || 0), 0);
+    const totalSavedMin = tripsArr.reduce((a, t) => a + Number(t.time_saved_min || 0), 0);
+    return {
+      users: users.count || 0,
+      trips: tripsArr.length,
+      tripsCompleted: completed,
+      tripsActive: active,
+      stops: stops.count || 0,
+      activity24h: todayActivity.count || 0,
+      totalDistanceKm: Math.round(totalKm * 10) / 10,
+      totalSavedMin: Math.round(totalSavedMin),
+    };
+  }
+
+  async function adminDeleteTrip(tripId) {
+    requireAdmin();
+    const { error } = await sb.from('trips').delete().eq('id', tripId);
+    if (error) throw new Error(error.message);
+    await refreshAll();
+  }
+
+  async function adminPromoteUser(userId, role) {
+    requireAdmin();
+    if (!['user', 'admin'].includes(role)) throw new Error('Invalid role');
+    const { error } = await sb.from('profiles').update({ role }).eq('id', userId);
+    if (error) throw new Error(error.message);
+  }
+
   // ---------- Subscribe ----------
   function subscribe(cb) {
     const handler = () => cb();
@@ -636,6 +756,14 @@
     optimiseRoute, parsePostcodes, geocodeBatch, mockGeocode,
     updateProfile,
     uid, subscribe, isReady, onReady,
+    admin: {
+      fetchUsers: adminFetchUsers,
+      fetchAllTrips: adminFetchAllTrips,
+      fetchActivity: adminFetchActivity,
+      stats: adminStats,
+      deleteTrip: adminDeleteTrip,
+      promoteUser: adminPromoteUser,
+    },
     _supabase: sb,
     cloud: {
       configured: true,
@@ -649,6 +777,18 @@
   // ---------- boot ----------
   // The auth listener will fire INITIAL_SESSION shortly; we still kick a
   // synchronous-ish path so RF.isReady flips even if no session exists.
+  // Hard-cap the boot at 8s so a stalled network never strands the splash.
+  let bootDone = false;
+  function markReady() {
+    if (bootDone) return;
+    bootDone = true;
+    ready = true;
+    window.dispatchEvent(new CustomEvent('rf:ready'));
+  }
+  setTimeout(() => {
+    if (!bootDone) console.warn('[RF] boot timed out after 8s - rendering anyway');
+    markReady();
+  }, 8000);
   (async () => {
     try {
       await syncUserFromSession();
@@ -656,8 +796,7 @@
     } catch (e) {
       console.warn('[RF] boot error', e);
     } finally {
-      ready = true;
-      window.dispatchEvent(new CustomEvent('rf:ready'));
+      markReady();
     }
   })();
 })();

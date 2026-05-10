@@ -17,10 +17,11 @@ function App() {
       setReady(true);
       const u = RF.getCurrentUser();
       setUser(u);
-      // If the URL has no hash and the user is signed in, drop them on the
-      // dashboard. Otherwise honour whatever hash they came in with.
+      // If the URL has no hash and the user is signed in, route based on role:
+      // admins land on /admin, drivers land on /dashboard. Otherwise honour
+      // the hash they came in with.
       const h = window.location.hash.replace('#', '').split('?')[0];
-      if (!h) setRoute(u ? 'dashboard' : 'landing');
+      if (!h) setRoute(u ? (u.isAdmin ? 'admin' : 'dashboard') : 'landing');
     });
     return () => {
       window.removeEventListener('rf:user-changed', onUserChanged);
@@ -52,17 +53,29 @@ function App() {
     window.location.hash = r;
   }
 
-  function onAuthed(u) { setUser(u); }
+  function onAuthed(u) {
+    setUser(u);
+    // Admins go straight to the operations console; drivers to their dashboard.
+    navigate(u?.isAdmin ? 'admin' : 'dashboard');
+  }
   async function onSignOut() {
     await RF.signOut();
     setUser(null);
     navigate('landing');
   }
 
-  // Protect routes that require auth
-  const authedRoutes = ['dashboard', 'create-trip', 'optimise', 'live', 'summary', 'analytics', 'settings'];
+  // Routes that require any signed-in user, and routes that additionally
+  // require role=admin. Admin-only access is enforced both at the route level
+  // (here) and at the data layer (admin RLS policies in Supabase).
+  const authedRoutes = ['dashboard', 'create-trip', 'optimise', 'live', 'summary', 'analytics', 'settings', 'admin', 'admin-users', 'admin-trips'];
+  const adminRoutes = ['admin', 'admin-users', 'admin-trips'];
   if (authedRoutes.includes(route) && !user) {
     return <RFUI.ToastProvider><AuthPage navigate={navigate} onAuthed={onAuthed} /></RFUI.ToastProvider>;
+  }
+  if (adminRoutes.includes(route) && user && !user.isAdmin) {
+    // A signed-in driver tried to hit an admin URL — bounce them home.
+    setTimeout(() => navigate('dashboard'), 0);
+    return null;
   }
 
   // Landing has its own chrome
@@ -98,6 +111,9 @@ function App() {
           {route === 'summary' && <SummaryPage navigate={navigate} params={params} />}
           {route === 'analytics' && <AnalyticsPage navigate={navigate} />}
           {route === 'settings' && <SettingsPage user={user} navigate={navigate} onSignOut={onSignOut} />}
+          {route === 'admin' && <AdminPage navigate={navigate} tab="overview" />}
+          {route === 'admin-users' && <AdminPage navigate={navigate} tab="users" />}
+          {route === 'admin-trips' && <AdminPage navigate={navigate} tab="trips" />}
         </main>
       </div>
     </RFUI.ToastProvider>
@@ -105,7 +121,10 @@ function App() {
 }
 
 function titleFor(r) {
-  const map = { dashboard: 'Dashboard', 'create-trip': 'New trip', optimise: 'Optimising', summary: 'Trip summary', analytics: 'Analytics', settings: 'Settings' };
+  const map = {
+    dashboard: 'Dashboard', 'create-trip': 'New trip', optimise: 'Optimising', summary: 'Trip summary', analytics: 'Analytics', settings: 'Settings',
+    admin: 'Operations console', 'admin-users': 'Drivers', 'admin-trips': 'All trips',
+  };
   return map[r] || 'RouteFlow';
 }
 
