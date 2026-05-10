@@ -34,18 +34,20 @@ function AuthPage({ navigate, onAuthed }) {
     finally { setLoading(false); }
   }
 
+  // Pre-fills the form with a shared demo account so reviewers can poke around
+  // without creating their own login. The demo accounts must already exist in
+  // Supabase (seed once via a normal signup); we don't auto-create them here
+  // - that path led to the "Alex Driver" placeholder being written into a
+  // real user's profile when they accidentally typed the demo email.
   function quickDemo(role = 'driver') {
     if (role === 'admin') {
       setEmail('admin@routeflow.app');
       setPassword('admin12345');
-      setFullName('Manager Admin');
     } else {
       setEmail('demo@routeflow.app');
       setPassword('demo123');
-      setFullName('Alex Driver');
     }
     setTab('signin');
-    setTimeout(() => document.getElementById('auth-submit')?.click(), 50);
   }
 
   return (
@@ -92,6 +94,9 @@ function AuthPage({ navigate, onAuthed }) {
         </form>
 
         <div className="divider"></div>
+        <div className="text-xs text-muted" style={{ textAlign: 'center', marginBottom: 8 }}>
+          Just exploring? Pre-fill a shared demo login (review & evaluation only)
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           <button type="button" className="btn btn-secondary btn-block" onClick={() => quickDemo('driver')}>
             <I.Sparkles size={14} /> Driver demo

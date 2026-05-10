@@ -58,12 +58,19 @@ function AdminPage({ navigate, tab: initialTab }) {
 
   async function onPromote(u) {
     const next = u.role === 'admin' ? 'user' : 'admin';
-    if (!confirm(`Change ${u.fullName || u.email}'s role to "${next}"?`)) return;
+    const me = RF.getCurrentUser();
+    const isSelf = me?.id === u.id;
+    const lead = isSelf
+      ? `Demote yourself to "user"? You'll lose admin access immediately and be bounced to the driver dashboard.`
+      : `Change ${u.fullName || u.email}'s role to "${next}"?`;
+    if (!confirm(lead)) return;
     setBusyId(u.id);
     try {
       await RF.admin.promoteUser(u.id, next);
-      toast(`Role updated to ${next}`, 'success');
-      await load();
+      toast(isSelf ? `You are now a ${next}` : `Role updated to ${next}`, 'success');
+      // Self-demote: the auth state will fire user-changed, app.jsx route guard
+      // bounces to /dashboard automatically. No need to load() again.
+      if (!isSelf) await load();
     } catch (e) {
       toast(e.message || 'Role change failed', 'error');
     } finally { setBusyId(null); }

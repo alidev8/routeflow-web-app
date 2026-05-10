@@ -15,6 +15,7 @@ function LivePage({ navigate, params }) {
     try { return RF.getPendingDeliveries ? RF.getPendingDeliveries().length : 0; } catch { return 0; }
   });
   const [loadState, setLoadState] = React.useState('loading'); // loading | ready | not-found | no-trip-id
+  const [glanceMode, setGlanceMode] = React.useState(false);
 
   React.useEffect(() => {
     const onOn = () => setOnline(true);
@@ -299,21 +300,173 @@ function LivePage({ navigate, params }) {
     if (m < 1000) return `${Math.round(m)} m`;
     return `${(m / 1000).toFixed(2)} km`;
   }
+  function fmtClock(d) {
+    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  }
 
-  return (
-    <div className="live-shell">
-      <div className="live-header">
-        <button className="icon-btn" onClick={() => navigate('dashboard')} title="Back"><I.ArrowLeft size={16} /></button>
-        <div className="live-header-card">
-          <div className="left">
-            <div className="small">Currently</div>
-            <div className="big">{cur ? cur.postcode : 'No stops'}</div>
+  // ---------- Glanceable HUD computations ----------
+  // Progress: how far through the route are we, in percent of stops delivered.
+  const deliveredCount = stops.filter((s) => s.status === 'delivered').length;
+  const totalStops = stops.length;
+  const pctDone = totalStops > 0 ? Math.round((deliveredCount / totalStops) * 100) : 0;
+
+  // ETA-to-finish: now + sum of remaining selectedTime minutes (current stop
+  // included if not yet delivered). Falls back gracefully if no times set.
+  const remainingMinutes = stops
+    .slice(current)
+    .filter((s) => s.status !== 'delivered')
+    .reduce((acc, s) => acc + (Number(s.selectedTime) || Number(s.walkingTime) || Number(s.drivingTime) || 0), 0);
+  const etaFinish = new Date(now.getTime() + remainingMinutes * 60 * 1000);
+
+  // Human-readable reasoning that replaces the dev-speak `cur.reasoning`. We
+  // build this from the structured fields rather than the optimiser's raw text.
+  const humanReasoning = (() => {
+    if (!cur) return '';
+    if (cur.isParkAnchor && cur.clusterSize > 1) {
+      return `Park here — ${cur.clusterSize - 1} more drop${cur.clusterSize - 1 === 1 ? '' : 's'} are on foot from this spot.`;
+    }
+    if (cur.mode === 'walking' && activeParkAnchor) {
+      const m = cur.walkFromParkMin > 0 ? ` (~${cur.walkFromParkMin} min from the van)` : '';
+      return `Walking leg — same cluster as your last drop${m}, faster than re-parking.`;
+    }
+    if (cur.mode === 'driving') {
+      const km = Number(cur.distanceFromPrevious || 0);
+      const mins = Number(cur.selectedTime || cur.drivingTime || 0);
+      if (km > 0 || mins > 0) {
+        return `Drive ${km ? km.toFixed(1) + ' km' : ''}${km && mins ? ' · ' : ''}${mins ? '~' + mins + ' min' : ''} to the next neighbourhood.`;
+      }
+      return 'Drive to the next stop.';
+    }
+    return cur.reasoning || '';
+  })();
+
+  // Cluster preview: when we land on a multi-stop park anchor, show a card
+  // summarising the whole walking loop so the driver can mentally pre-load
+  // before they even step out of the van.
+  const clusterPreview = (() => {
+    if (!cur || !cur.isParkAnchor || (cur.clusterSize || 1) <= 1) return null;
+    const inCluster = stops.filter((s) => s.clusterId === cur.clusterId);
+    if (inCluster.length <= 1) return null;
+    const onFootMin = inCluster
+      .filter((s) => s !== cur)
+      .reduce((a, s) => a + (Number(s.selectedTime) || Number(s.walkingTime) || 0), 0);
+    const maxWalkFromVan = Math.max(0, ...inCluster.map((s) => s.walkFromParkMin || 0));
+    // Next driving stop after the cluster (the one that breaks clusterId)
+    const lastIdx = stops.lastIndexOf(inCluster[inCluster.length - 1]);
+    const nextDrive = stops[lastIdx + 1];
+    return {
+      drops: inCluster.length,
+      onFootMin,
+      maxWalkFromVan,
+      nextDriveMin: nextDrive ? Number(nextDrive.drivingTime || nextDrive.selectedTime || 0) : 0,
+      nextPostcode: nextDrive?.postcode || null,
+    };
+  })();
+
+  // ---------- Glance mode overlay ----------
+  // Full-screen heads-up display. Eyes-up driving / hands-full walking. The
+  // whole screen is the tap target for "mark delivered" - matches industry
+  // norms (Onfleet, Amazon Flex). Tiny exit X in the top-right.
+  function GlanceOverlay() {
+    if (!glanceMode || !cur) return null;
+    let bg, fg, modeWord, ModeIcon;
+    if (cur.mode === 'walking') {
+      modeWord = isLastWalkInCluster ? 'LAST WALK' : 'WALK';
+      ModeIcon = I.Walk;
+      bg = isLastWalkInCluster ? 'linear-gradient(180deg, #C77600, #7A4500)' : 'linear-gradient(180deg, #1F9F40, #0E5F26)';
+      fg = '#fff';
+    } else {
+      modeWord = 'DRIVE';
+      ModeIcon = I.Car;
+      bg = 'linear-gradient(180deg, #0A84FF, #0961C7)';
+      fg = '#fff';
+    }
+    return (
+      <div
+        onClick={() => { markDelivered(); setGlanceMode(false); }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 99999,
+          background: bg, color: fg,
+          display: 'flex', flexDirection: 'column',
+          padding: '24px 28px', cursor: 'pointer',
+          userSelect: 'none',
+        }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{
+              fontSize: 11, fontWeight: 800, letterSpacing: '0.12em',
+              padding: '4px 10px', borderRadius: 999, background: 'rgba(0,0,0,0.25)',
+            }}>{modeWord}</span>
+            <span className="mono fw-700" style={{ fontSize: 12, opacity: 0.85 }}>
+              Stop {Math.min(current + 1, totalStops)}/{totalStops} · {pctDone}% · ETA {fmtClock(etaFinish)}
+            </span>
           </div>
-          <div style={{ textAlign: 'right' }}>
-            <div className="small">Remaining</div>
-            <div className="big mono">{remaining}/{stops.length}</div>
+          <button onClick={(e) => { e.stopPropagation(); setGlanceMode(false); }}
+            style={{
+              width: 38, height: 38, borderRadius: 12,
+              background: 'rgba(0,0,0,0.25)', color: fg,
+              display: 'grid', placeItems: 'center', cursor: 'pointer',
+            }}>
+            <I.X size={18} stroke={fg} />
+          </button>
+        </div>
+
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', textAlign: 'center', gap: 18 }}>
+          <ModeIcon size={64} stroke={fg} />
+          {liveVanDistanceM != null && cur.mode === 'walking' && (
+            <div style={{ fontSize: 18, opacity: 0.85, fontWeight: 700 }}>
+              {liveVanDistanceM < 1000 ? `${liveVanDistanceM} m` : `${(liveVanDistanceM/1000).toFixed(2)} km`} from your van
+            </div>
+          )}
+          <div className="mono" style={{ fontSize: 'clamp(48px, 14vw, 96px)', fontWeight: 900, letterSpacing: '-0.02em', lineHeight: 1 }}>
+            {cur.postcode}
+          </div>
+          <div style={{ fontSize: 17, opacity: 0.9, maxWidth: 480 }}>
+            {humanReasoning}
+          </div>
+          {decisionFlip && (
+            <div style={{
+              padding: '8px 14px', borderRadius: 999,
+              background: 'rgba(0,0,0,0.30)', fontSize: 13, fontWeight: 700,
+            }}>
+              Live traffic: try {decisionFlip.recommended} instead — saves ~{fmtSec(decisionFlip.deltaSec)}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, paddingBottom: 8 }}>
+          <div style={{
+            padding: '14px 24px', borderRadius: 999,
+            background: 'rgba(255,255,255,0.16)',
+            fontSize: 14, fontWeight: 800, letterSpacing: '0.08em',
+          }}>
+            TAP ANYWHERE TO MARK DELIVERED
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.7 }}>
+            X (top-right) returns to map view
           </div>
         </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+    <GlanceOverlay />
+    <div className="live-shell">
+      <div className="live-header" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button className="icon-btn" onClick={() => navigate('dashboard')} title="Back"><I.ArrowLeft size={16} /></button>
+          <div className="live-header-card" style={{ flex: 1 }}>
+            <div className="left">
+              <div className="small">Currently</div>
+              <div className="big">{cur ? cur.postcode : 'No stops'}</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div className="small">Stop {Math.min(current + 1, totalStops)} of {totalStops}</div>
+              <div className="big mono">ETA {fmtClock(etaFinish)}</div>
+            </div>
+          </div>
         <div className="live-header-card" style={{ flex: '0 0 auto', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
           {!online && (
             <span title="Offline - deliveries will sync when back online" style={{
@@ -335,8 +488,34 @@ function LivePage({ navigate, params }) {
               border: '1px solid rgba(10, 132, 255, 0.40)',
             }}>{pending} queued</span>
           )}
+          <button onClick={() => setGlanceMode(true)} title="Glance mode - eyes-up driving view"
+            style={{
+              fontSize: 10, fontWeight: 700,
+              padding: '3px 8px', borderRadius: 999,
+              background: 'rgba(255, 159, 10, 0.18)', color: '#FF9F0A',
+              border: '1px solid rgba(255, 159, 10, 0.45)',
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+            }}>
+            <span style={{ width: 6, height: 6, borderRadius: 3, background: '#FF9F0A' }}></span>
+            GLANCE
+          </button>
           <div className="mono fw-600" style={{ fontSize: 13 }}>
-            {now.getHours().toString().padStart(2, '0')}:{now.getMinutes().toString().padStart(2, '0')}
+            {fmtClock(now)}
+          </div>
+        </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0 6px' }}>
+          <div style={{ flex: 1, height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 999, overflow: 'hidden', position: 'relative' }}>
+            <div style={{
+              width: pctDone + '%', height: '100%',
+              background: 'linear-gradient(90deg, #30D158, #0A84FF)',
+              borderRadius: 999,
+              transition: 'width 0.4s ease',
+            }}></div>
+          </div>
+          <div className="mono fw-700" style={{ fontSize: 11, color: 'var(--color-text-secondary)', minWidth: 70, textAlign: 'right' }}>
+            {pctDone}% · {deliveredCount}/{totalStops}
           </div>
         </div>
       </div>
@@ -471,6 +650,28 @@ function LivePage({ navigate, params }) {
                 </div>
               </div>
             )}
+            {clusterPreview && (
+              <div style={{
+                background: 'var(--color-surface-2)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--r-md)',
+                padding: '10px 14px',
+                marginBottom: 12,
+              }}>
+                <div className="text-xs fw-600" style={{ textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                  Cluster preview
+                </div>
+                <div className="text-sm" style={{ lineHeight: 1.5 }}>
+                  <b>{clusterPreview.drops} drops</b> walked from this spot
+                  {clusterPreview.onFootMin > 0 && <> · <b>~{clusterPreview.onFootMin} min</b> on foot total</>}
+                  {clusterPreview.maxWalkFromVan > 0 && <> · furthest is ~{clusterPreview.maxWalkFromVan} min from the van</>}
+                  {clusterPreview.nextPostcode && (
+                    <> · then drive {clusterPreview.nextDriveMin > 0 ? `~${clusterPreview.nextDriveMin} min ` : ''}to <b className="mono">{clusterPreview.nextPostcode}</b></>
+                  )}
+                  .
+                </div>
+              </div>
+            )}
             {cur.mode === 'walking' && !cur.isParkAnchor && activeParkAnchor && (
               <div style={{
                 background: 'rgba(48, 209, 88, 0.10)',
@@ -540,7 +741,7 @@ function LivePage({ navigate, params }) {
 
             <div className="text-sm text-secondary mt-4" style={{ padding: 12, background: 'var(--color-surface-2)', borderRadius: 'var(--r-md)' }}>
               <I.Info size={12} style={{ verticalAlign: 'middle', marginRight: 6, color: 'var(--color-accent)' }} />
-              {cur.reasoning}
+              {humanReasoning || cur.reasoning}
             </div>
 
             {(() => {
@@ -641,6 +842,7 @@ function LivePage({ navigate, params }) {
         )}
       </div>
     </div>
+    </>
   );
 }
 

@@ -143,7 +143,17 @@
 
   async function syncUserFromSession() {
     // getSession reads from local storage and is fast, but bound it anyway.
-    const sessionResp = await timeBound(sb.auth.getSession(), 4000, { data: null });
+    // Sentinel `__timeout__` lets us tell the difference between "supabase
+    // told us there's no session" (we should sign out) and "the call took
+    // too long" (we should keep whatever we already have - critically, this
+    // prevents a momentary network hiccup mid-session from booting the user
+    // back to the landing page).
+    const TIMEOUT = Symbol('rf-session-timeout');
+    const sessionResp = await timeBound(sb.auth.getSession(), 4000, TIMEOUT);
+    if (sessionResp === TIMEOUT) {
+      console.warn('[RF] getSession timed out - keeping current state');
+      return currentUser;
+    }
     const session = sessionResp?.data?.session;
     if (!session) {
       currentUser = null;
@@ -277,7 +287,7 @@
   }
 
   // ---------- auth lifecycle ----------
-  sb.auth.onAuthStateChange(async (event) => {
+  sb.auth.onAuthStateChange(async (event, session) => {
     if (event === 'SIGNED_OUT') {
       currentUser = null;
       teardownChannels();
@@ -287,21 +297,56 @@
       emit('store-changed');
       return;
     }
-    if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') {
+    if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
       await syncUserFromSession();
       if (currentUser) await refreshAll();
+      return;
+    }
+    if (event === 'TOKEN_REFRESHED') {
+      // The SDK has already swapped the new access token onto its internal
+      // client. We do NOT want to re-fetch the profile here - if that fetch
+      // fails on a slow network, syncUserFromSession would replace currentUser
+      // with a half-loaded copy (or worse, drop role='admin' to 'user'). The
+      // safest move is to just keep what we have.
+      if (session?.user?.id && currentUser?.id !== session.user.id) {
+        // Different user (rare: account-switching in the same tab). Re-sync.
+        await syncUserFromSession();
+        if (currentUser) await refreshAll();
+      }
+      return;
+    }
+    if (event === 'USER_UPDATED') {
+      // Profile metadata changed (e.g. email/name). Refresh in background;
+      // don't block the UI.
+      syncUserFromSession().catch(() => {});
     }
   });
 
   // ---------- Auth public API ----------
   async function signUp({ email, password, fullName }) {
     if (!email || !password) throw new Error('Email and password required');
+    if (password.length < 6) throw new Error('Password must be at least 6 characters');
+    const cleanName = (fullName || '').trim() || (email.split('@')[0] || '').trim();
+    if (!cleanName) throw new Error('Full name is required');
     const { data, error } = await sb.auth.signUp({
       email, password,
-      options: { data: { full_name: fullName || (email.split('@')[0]) } },
+      options: { data: { full_name: cleanName } },
     });
     if (error) throw new Error(error.message);
-    if (!data.session) throw new Error('Check your email to confirm your account');
+    if (!data.session) throw new Error('Check your email to confirm your account, then sign in');
+    // Defensive profile upsert: the handle_new_user trigger should populate
+    // the profiles row, but if the trigger is missing or rate-limited the
+    // user would land in a broken half-signed-in state. Upsert ourselves
+    // (RLS policy "profiles self upd" allows it for the owner).
+    try {
+      await sb.from('profiles').upsert({
+        id: data.user.id,
+        email: data.user.email,
+        full_name: cleanName,
+      }, { onConflict: 'id' });
+    } catch (e) {
+      console.warn('[RF] profile upsert after signUp failed', e);
+    }
     await syncUserFromSession();
     await refreshAll();
     pushActivity({ type: 'auth', title: 'Account created', meta: email }).catch(() => {});
@@ -310,20 +355,22 @@
 
   async function signIn({ email, password }) {
     if (!email || !password) throw new Error('Enter email and password');
-    let { data, error } = await sb.auth.signInWithPassword({ email, password });
-    if (error && /Invalid login credentials/i.test(error.message) && /^demo@routeflow\.app$/i.test(email)) {
-      const created = await sb.auth.signUp({ email, password, options: { data: { full_name: 'Alex Driver' } } });
-      if (created.error) throw new Error(created.error.message);
-      if (!created.data.session) {
-        const retry = await sb.auth.signInWithPassword({ email, password });
-        if (retry.error) throw new Error('Demo account exists but needs email confirmation. Disable confirmation in Supabase or use your own account.');
-        data = retry.data;
-      } else {
-        data = created.data;
-      }
-      error = null;
-    }
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
     if (error) throw new Error(error.message);
+    // Defensive profile insert: catches the "auth row exists but profile row
+    // doesn't" edge case that happens when the handle_new_user trigger was
+    // missing at signup time. ignoreDuplicates so we don't overwrite a name
+    // the user has already personalised in /settings.
+    try {
+      const fallbackName = data.user.user_metadata?.full_name || (email.split('@')[0] || '').trim() || 'Driver';
+      await sb.from('profiles').upsert({
+        id: data.user.id,
+        email: data.user.email,
+        full_name: fallbackName,
+      }, { onConflict: 'id', ignoreDuplicates: true });
+    } catch (e) {
+      console.warn('[RF] profile upsert after signIn failed', e);
+    }
     await syncUserFromSession();
     await refreshAll();
     pushActivity({ type: 'auth', title: 'Signed in', meta: email }).catch(() => {});
@@ -807,8 +854,14 @@
   async function adminPromoteUser(userId, role) {
     requireAdmin();
     if (!['user', 'admin'].includes(role)) throw new Error('Invalid role');
-    const { error } = await sb.from('profiles').update({ role }).eq('id', userId);
+    const { data, error } = await sb.from('profiles').update({ role }).eq('id', userId).select('id').single();
     if (error) throw new Error(error.message);
+    if (!data) throw new Error('No profile row for that user - signup may not have completed.');
+    // If the admin just changed their own role, re-sync the in-memory user
+    // object so the App router immediately reflects the new permissions.
+    if (currentUser?.id === userId) {
+      await syncUserFromSession();
+    }
   }
 
   // ---------- Subscribe ----------

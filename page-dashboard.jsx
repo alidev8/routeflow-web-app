@@ -93,7 +93,11 @@ function DashboardPage({ navigate }) {
 
       <div className="kpi-grid">
         {[
-          { label: 'Total trips', icon: I.Route, value: trips.length, delta: trips.length ? `+${Math.min(trips.length, 3)} this week` : 'No trips yet', up: trips.length > 0 },
+          (() => {
+            const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+            const wk = trips.filter((t) => new Date(t.date || t.createdAt).getTime() >= weekAgo).length;
+            return { label: 'Total trips', icon: I.Route, value: trips.length, delta: wk ? `+${wk} this week` : trips.length ? 'None in the last 7 days' : 'No trips yet', up: wk > 0 };
+          })(),
           { label: 'Stops delivered', icon: I.PinDrop, value: totalStops, delta: `${totalStops} total stops`, up: totalStops > 0 },
           { label: 'Time saved', icon: I.Clock, value: `${Math.round(totalSaved)}m`, delta: 'vs. drive-only baseline', up: true },
           { label: 'Distance', icon: I.TrendUp, value: `${totalDist.toFixed(1)}km`, delta: 'walked + driven', up: true },

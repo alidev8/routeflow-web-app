@@ -68,7 +68,7 @@ function LandingPage({ navigate, isAuthed }) {
           {[
             { i: I.Layers, t: 'Hybrid walk/drive', d: 'Clusters of close stops are walked from a single parking spot — saving time and fuel.' },
             { i: I.Zap, t: 'Real persistence', d: 'Every trip, stop and timing is saved to your account so you can pick up where you left off.' },
-            { i: I.Smartphone, t: 'Mobile-first PWA', d: 'Installable on iOS and Android. GPS, offline cache, and reduced-data tiles for live use.' },
+            { i: I.Smartphone, t: 'Mobile-first', d: 'Built for one-handed use in the cab — large tap targets, GPS-aware live page, queues deliveries when you drop into a black-spot.' },
             { i: I.Shield, t: 'Auth & roles', d: 'Driver and manager logins. Managers see live activity, drivers see only their route.' },
             { i: I.Activity, t: 'Live dashboard', d: 'Recent submissions, completion rate, alerts on failed checks, and time-saved trends.' },
             { i: I.Globe, t: 'Open data formats', d: 'CSV in, CSV/PDF out. No vendor lock-in. Plug into any existing logistics workflow.' },
@@ -90,9 +90,9 @@ function LandingPage({ navigate, isAuthed }) {
         <h2 style={{ maxWidth: 720, fontSize: 28 }}>A modern, production-grade stack.</h2>
         <div className="builtwith mt-6">
           {[
-            ['React 18', '#61DAFB'], ['TypeScript', '#3178C6'], ['Vite 6', '#646CFF'],
-            ['TailwindCSS 4', '#06B6D4'], ['Supabase', '#3ECF8E'], ['Google Maps', '#4285F4'],
-            ['Framer Motion', '#FF4D4D'], ['PWA / Workbox', '#FB923C'], ['jsPDF', '#A78BFA'],
+            ['React 18', '#61DAFB'], ['Supabase Auth', '#3ECF8E'], ['Supabase Realtime', '#3ECF8E'],
+            ['Postgres + RLS', '#336791'], ['Google Maps', '#4285F4'], ['Routes API v2', '#34A853'],
+            ['Vercel', '#FFFFFF'], ['Edge Functions (Deno)', '#000000'],
           ].map(([n, c]) => (
             <span key={n} className="tech-pill"><span className="dot" style={{ background: c }}></span>{n}</span>
           ))}

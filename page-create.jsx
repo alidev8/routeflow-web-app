@@ -2,7 +2,7 @@
 function CreateTripPage({ navigate, params }) {
   const toast = RFUI.useToast();
   const [step, setStep] = React.useState(1);
-  const [name, setName] = React.useState('Morning route ' + new Date().toLocaleDateString());
+  const [name, setName] = React.useState('');
   const [startTime, setStartTime] = React.useState('09:00');
   const [endTime, setEndTime] = React.useState('17:00');
   const [mode, setMode] = React.useState('hybrid');
@@ -110,7 +110,7 @@ function CreateTripPage({ navigate, params }) {
           <div className="flex-col gap-4">
             <div className="field">
               <label className="field-label">Trip name</label>
-              <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Tuesday CT route" />
+              <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Name this trip (e.g. Friday afternoon round)" />
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <div className="field">
