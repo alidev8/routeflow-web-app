@@ -350,19 +350,22 @@
       options: { data: { full_name: cleanName } },
     });
     if (error) throw new Error(error.message);
-    if (!data.session) throw new Error('Check your email to confirm your account, then sign in');
-    // The handle_new_user trigger creates the profile row, but if it's ever
-    // missing/disabled we defensively upsert. The "profiles self ins" RLS
-    // policy (auth.uid() = id) lets us do this safely. Don't block signup
-    // on a slow network - fire-and-forget with a short timeout.
-    timeBound(
-      sb.from('profiles').upsert({
-        id: data.user.id,
-        email: data.user.email,
-        full_name: cleanName,
-      }, { onConflict: 'id' }),
-      4000, null
-    ).catch((e) => console.warn('[RF] profile upsert after signUp failed', e));
+    // Supabase returns no session when "Confirm email" is enabled in the
+    // project's auth settings. Our auto-confirm trigger marks the user as
+    // confirmed at insert time, so a follow-up password sign-in works
+    // immediately - no email click needed. This makes signup feel like a
+    // single step regardless of how the project is configured.
+    if (!data.session) {
+      try {
+        const { data: si, error: serr } = await sb.auth.signInWithPassword({ email, password });
+        if (serr || !si?.session) {
+          throw new Error('Check your email to confirm your account, then sign in');
+        }
+      } catch (e) {
+        if (e?.message?.includes('Check your email')) throw e;
+        throw new Error('Check your email to confirm your account, then sign in');
+      }
+    }
     await syncUserFromSession();
     await refreshAll();
     pushActivity({ type: 'auth', title: 'Account created', meta: email }).catch(() => {});
@@ -397,6 +400,59 @@
   // ---------- Trips ----------
   function getTrips() { return trips; }
   function getTrip(id) { return trips.find((t) => t.id === id) || null; }
+
+  // ---------- Direct REST escape hatch ----------
+  // The supabase-js SDK auto-refreshes the access token before any REST call
+  // it routes. On a slow connection that refresh can hang for tens of
+  // seconds, taking down all `from(...)` calls with it - this is what was
+  // causing the "Saving trip timed out after 25s" the user kept hitting
+  // even though Supabase itself answers a trip upsert in 300ms. The direct
+  // path below uses the cached access token from localStorage and calls
+  // PostgREST without touching the SDK's refresh path. If the token is
+  // genuinely expired, we get a 401 back fast and surface a clear error.
+  function _projectRef() {
+    const m = (SUPABASE_URL || '').match(/https:\/\/([^.]+)\./);
+    return m ? m[1] : '';
+  }
+  function _cachedAccessToken() {
+    try {
+      const ref = _projectRef();
+      if (!ref) return null;
+      const raw = localStorage.getItem(`sb-${ref}-auth-token`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed?.access_token || parsed?.currentSession?.access_token || null;
+    } catch { return null; }
+  }
+  async function directRest(path, { method = 'POST', body, prefer, timeoutMs = 25000 } = {}) {
+    const token = _cachedAccessToken();
+    if (!token) throw new Error('No active session - please sign in again');
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+        method,
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Prefer': prefer || 'return=minimal',
+        },
+        body: body == null ? undefined : JSON.stringify(body),
+        signal: ctl.signal,
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        const err = new Error(text || `HTTP ${r.status}`);
+        err.status = r.status;
+        throw err;
+      }
+      return r;
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error(`Timed out after ${Math.round(timeoutMs/1000)}s - check your connection`);
+      throw e;
+    } finally { clearTimeout(timer); }
+  }
 
   // Wraps a Supabase promise so a stalled network connection surfaces as a
   // clean error instead of leaving the UI spinning forever.
@@ -442,12 +498,18 @@
       time_saved_min: Number(trip.timeSaved || 0),
       completed_at: trip.completedAt || null,
     };
-    const upRes = await withRetry(
-      () => sb.from('trips').upsert(tripRow, { onConflict: 'id' }),
+    // Use the direct REST path here so the SDK's session-refresh logic
+    // can't hang the write. On slow networks, that refresh was the source
+    // of the 25s timeouts.
+    await withRetry(
+      () => directRest('trips?on_conflict=id', {
+        body: tripRow,
+        prefer: 'resolution=merge-duplicates,return=minimal',
+        timeoutMs: 25000,
+      }),
       'Saving trip',
       25000
     );
-    if (upRes.error) throw new Error(upRes.error.message);
 
     function buildOptimisedRows() {
       return trip.optimised.map((s) => ({
@@ -471,12 +533,16 @@
     }
 
     if (Array.isArray(trip.optimised) && trip.optimised.length) {
+      const rows = buildOptimisedRows();
       if (isFreshTrip) {
-        // No existing stops to merge with - go straight to insert.
-        const rows = buildOptimisedRows();
-        const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
-        if (insRes.error) throw new Error(insRes.error.message);
+        await withRetry(
+          () => directRest('stops', { body: rows, timeoutMs: 30000 }),
+          `Saving ${rows.length} stops`,
+          30000
+        );
       } else {
+        // Existing trip - need to figure out whether to overwrite. Use the
+        // SDK here (low-volume read, doesn't matter if the SDK is slow).
         const { data: existing } = await withRetry(
           () => sb.from('stops').select('id, status, delivered_at, latitude').eq('trip_id', trip.id),
           'Checking existing stops',
@@ -487,11 +553,17 @@
           (existing || []).length === trip.optimised.length &&
           (existing || []).every((r) => r.latitude != null);
         if (!hasMutation && !alreadyOptimised) {
-          await withRetry(() => sb.from('stops').delete().eq('trip_id', trip.id), 'Clearing old stops', 15000);
-          const rows = buildOptimisedRows();
+          await withRetry(
+            () => directRest(`stops?trip_id=eq.${trip.id}`, { method: 'DELETE', timeoutMs: 15000 }),
+            'Clearing old stops',
+            15000
+          );
           if (rows.length) {
-            const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
-            if (insRes.error) throw new Error(insRes.error.message);
+            await withRetry(
+              () => directRest('stops', { body: rows, timeoutMs: 30000 }),
+              `Saving ${rows.length} stops`,
+              30000
+            );
           }
         }
       }
@@ -505,8 +577,11 @@
       }));
       if (isFreshTrip) {
         // Fresh trip: just insert. No existing stops by definition.
-        const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
-        if (insRes.error) throw new Error(insRes.error.message);
+        await withRetry(
+          () => directRest('stops', { body: rows, timeoutMs: 30000 }),
+          `Saving ${rows.length} stops`,
+          30000
+        );
       } else {
         const { count } = await withRetry(
           () => sb.from('stops').select('id', { count: 'exact', head: true }).eq('trip_id', trip.id),
@@ -514,8 +589,11 @@
           15000
         );
         if (!count) {
-          const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
-          if (insRes.error) throw new Error(insRes.error.message);
+          await withRetry(
+            () => directRest('stops', { body: rows, timeoutMs: 30000 }),
+            `Saving ${rows.length} stops`,
+            30000
+          );
         }
       }
     }
