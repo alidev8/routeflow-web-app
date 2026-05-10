@@ -654,14 +654,19 @@
   async function pushActivity({ type, title, meta, tripId }) {
     const userId = await requireUserId().catch(() => null);
     if (!userId) return;
-    const { error } = await sb.from('activity').insert({
-      user_id: userId,
-      trip_id: tripId || null,
-      type,
-      title,
-      meta: meta || null,
-    });
-    if (error) console.warn('[RF] pushActivity', error);
+    // pushActivity is fire-and-forget by every caller (.catch chained), so
+    // we just need it to not pin a connection. directRest with a short
+    // timeout - activity is best-effort logging, not critical state.
+    await directRest('activity', {
+      timeoutMs: 6000,
+      body: {
+        user_id: userId,
+        trip_id: tripId || null,
+        type,
+        title,
+        meta: meta || null,
+      },
+    }).catch((e) => console.warn('[RF] pushActivity', e?.message));
   }
 
   // ---------- Optimisation (Edge Function) ----------
@@ -753,7 +758,6 @@
 
   // ---------- Stops ----------
   async function markStopDelivered(stopId, opts = {}) {
-    await requireUserId();
     if (!stopId) return;
     // Don't touch notes unless explicitly given: it carries cluster/weight
     // metadata we need for the live-page banners.
@@ -762,9 +766,16 @@
       delivered_at: new Date().toISOString(),
     };
     if (opts.notes !== undefined) patch.notes = opts.notes;
-    const { error } = await sb.from('stops').update(patch).eq('id', stopId);
-    if (error) throw new Error(error.message);
-    await refreshAll();
+    // directRest so a slow SDK session-refresh can't pin a delivery write.
+    // The live page calls this on every "Mark delivered" tap - any hang here
+    // breaks the driver's flow.
+    await directRest(`stops?id=eq.${stopId}`, {
+      method: 'PATCH',
+      body: patch,
+      timeoutMs: 15000,
+    });
+    // Background refresh - don't block the UI on the read.
+    Promise.resolve().then(() => withTimeout(refreshAll(), 8000, 'background refresh').catch(() => {}));
   }
 
   // Same operation but offline-aware: if the network's down (or the request
@@ -826,8 +837,14 @@
   async function updateDriverPosition({ tripId, lat, lng, heading, speed, accuracy, source }) {
     const userId = await requireUserId().catch(() => null);
     if (!userId || lat == null || lng == null) return;
-    await sb.from('driver_positions').upsert(
-      {
+    // GPS pings happen every ~3s during a delivery; we MUST NOT block on
+    // the SDK's refresh path here. directRest with a tight timeout - if a
+    // single ping fails, the next one will overwrite it anyway.
+    await directRest('driver_positions?on_conflict=user_id', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      timeoutMs: 6000,
+      body: {
         user_id: userId,
         trip_id: tripId || null,
         latitude: lat,
@@ -838,8 +855,7 @@
         source: source || 'gps',
         updated_at: new Date().toISOString(),
       },
-      { onConflict: 'user_id' }
-    );
+    }).catch((e) => console.warn('[RF] driver position upsert failed', e?.message));
   }
 
   // ---------- Profile ----------
