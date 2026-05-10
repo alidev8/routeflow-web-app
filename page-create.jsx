@@ -1,0 +1,234 @@
+// Create trip flow — wizard with 3 steps + postcode input methods.
+function CreateTripPage({ navigate, params }) {
+  const toast = RFUI.useToast();
+  const [step, setStep] = React.useState(1);
+  const [name, setName] = React.useState('Morning route ' + new Date().toLocaleDateString());
+  const [startTime, setStartTime] = React.useState('09:00');
+  const [endTime, setEndTime] = React.useState('17:00');
+  const [mode, setMode] = React.useState('hybrid');
+  const [tab, setTab] = React.useState(params?.tab === 'csv' ? 'csv' : 'paste');
+  const [bulk, setBulk] = React.useState('');
+  const [single, setSingle] = React.useState('');
+  const [stops, setStops] = React.useState([]);
+  const fileRef = React.useRef(null);
+
+  React.useEffect(() => { setStops(RF.parsePostcodes(bulk)); }, [bulk]);
+
+  function addSingle() {
+    const parsed = RF.parsePostcodes(single);
+    if (!parsed.length) { toast('Not a valid postcode', 'error'); return; }
+    setStops((s) => Array.from(new Set([...s, ...parsed])));
+    setSingle('');
+  }
+  function removeStop(pc) { setStops((s) => s.filter((x) => x !== pc)); }
+
+  function onFile(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      const parsed = RF.parsePostcodes(String(r.result));
+      setStops(parsed);
+      setTab('paste');
+      setBulk(String(r.result));
+      toast(`Imported ${parsed.length} postcodes`, 'success');
+    };
+    r.readAsText(f);
+  }
+
+  async function startOptimise() {
+    if (stops.length < 2) { toast('Add at least 2 stops', 'error'); return; }
+    const trip = {
+      id: RF.uid(),
+      name,
+      date: new Date().toISOString(),
+      startTime, endTime, mode,
+      stops: stops.length,
+      stopList: stops,
+      totalDistance: 0,
+      timeSaved: 0,
+      status: 'optimising',
+    };
+    await RF.saveTrip(trip);
+    RF.pushActivity({ type: 'submit', title: 'Trip created', meta: `${stops.length} stops · ${name}` });
+    navigate('optimise', { tripId: trip.id });
+  }
+
+  return (
+    <div className="page fade-in">
+      <button className="btn btn-ghost btn-sm" onClick={() => navigate('dashboard')} style={{ marginBottom: 12 }}>
+        <I.ArrowLeft size={14} /> Dashboard
+      </button>
+      <div className="page-head">
+        <div>
+          <div className="page-title">Create trip</div>
+          <div className="page-sub">Three quick steps. Saves automatically.</div>
+        </div>
+      </div>
+
+      <div className="steps">
+        {[
+          { n: 1, t: 'Trip details' },
+          { n: 2, t: 'Add stops' },
+          { n: 3, t: 'Confirm' },
+        ].map((s, i, arr) => (
+          <React.Fragment key={s.n}>
+            <div className={`step ${step === s.n ? 'active' : step > s.n ? 'done' : ''}`}>
+              <div className="step-dot">{step > s.n ? <I.Check size={12} stroke="#052013" /> : s.n}</div>
+              <span>{s.t}</span>
+            </div>
+            {i < arr.length - 1 && <div className="step-bar"></div>}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {step === 1 && (
+        <div className="card slide-up" style={{ maxWidth: 720 }}>
+          <div className="flex-col gap-4">
+            <div className="field">
+              <label className="field-label">Trip name</label>
+              <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Tuesday CT route" />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div className="field">
+                <label className="field-label">Start time</label>
+                <input className="input" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+              </div>
+              <div className="field">
+                <label className="field-label">End time</label>
+                <input className="input" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+              </div>
+            </div>
+            <div className="field">
+              <label className="field-label">Travel mode</label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                {[
+                  { k: 'hybrid', l: 'Hybrid', s: 'Walk + drive', i: I.Layers },
+                  { k: 'walking', l: 'Walking', s: 'Foot only', i: I.Walk },
+                  { k: 'driving', l: 'Driving', s: 'Car only', i: I.Car },
+                ].map((o) => {
+                  const Ic = o.i;
+                  const active = mode === o.k;
+                  return (
+                    <button key={o.k} type="button" onClick={() => setMode(o.k)}
+                      style={{
+                        padding: 14, borderRadius: 'var(--r-md)', textAlign: 'left',
+                        background: active ? 'rgba(10,132,255,0.1)' : 'var(--color-surface-2)',
+                        border: `1px solid ${active ? 'var(--color-accent)' : 'var(--color-border)'}`,
+                        transition: 'var(--t-fast)',
+                      }}>
+                      <Ic size={18} stroke={active ? 'var(--color-accent)' : 'currentColor'} />
+                      <div style={{ fontWeight: 600, marginTop: 8, fontSize: 14 }}>{o.l}</div>
+                      <div className="text-xs text-muted">{o.s}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 24 }}>
+            <button className="btn btn-primary" onClick={() => setStep(2)} disabled={!name}>Continue <I.ArrowRight size={14} /></button>
+          </div>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div className="card slide-up">
+          <div className="tabs" style={{ marginBottom: 16 }}>
+            <button className={`tab ${tab === 'paste' ? 'active' : ''}`} onClick={() => setTab('paste')}>Bulk paste</button>
+            <button className={`tab ${tab === 'csv' ? 'active' : ''}`} onClick={() => setTab('csv')}>CSV upload</button>
+            <button className={`tab ${tab === 'single' ? 'active' : ''}`} onClick={() => setTab('single')}>Single entry</button>
+          </div>
+
+          {tab === 'paste' && (
+            <div className="field">
+              <label className="field-label">Paste postcodes (one per line, comma, or space)</label>
+              <textarea className="textarea" placeholder="CT1 1AB&#10;CT1 2HU, CT2 7NF&#10;ME14 1XX" value={bulk} onChange={(e) => setBulk(e.target.value)} style={{ minHeight: 160 }} />
+              <div className="field-hint">Detected: <span className="mono" style={{ color: 'var(--color-text-primary)' }}>{stops.length}</span> postcodes</div>
+            </div>
+          )}
+
+          {tab === 'csv' && (
+            <div>
+              <input ref={fileRef} type="file" accept=".csv,.txt" hidden onChange={onFile} />
+              <div onClick={() => fileRef.current?.click()}
+                   style={{ padding: '40px 20px', border: '2px dashed var(--color-border)', borderRadius: 'var(--r-lg)', textAlign: 'center', cursor: 'pointer', background: 'var(--color-surface-2)', transition: 'var(--t-fast)' }}>
+                <div className="empty-icon" style={{ background: 'var(--color-surface)' }}><I.Upload size={20} /></div>
+                <div style={{ fontWeight: 600 }}>Drop CSV or click to upload</div>
+                <div className="text-sm text-muted mt-2">We'll extract any column containing postcodes</div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'single' && (
+            <div className="field">
+              <label className="field-label">Add one stop at a time</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input className="input" placeholder="CT1 1AB" value={single} onChange={(e) => setSingle(e.target.value)}
+                       onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addSingle())} />
+                <button className="btn btn-primary" onClick={addSingle}>Add</button>
+              </div>
+            </div>
+          )}
+
+          {stops.length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+                Stops ({stops.length})
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {stops.map((pc, i) => (
+                  <span key={pc} className="chip chip-muted mono" style={{ height: 28, fontSize: 12, paddingRight: 6 }}>
+                    <span style={{ color: 'var(--color-text-muted)' }}>{i + 1}.</span> {pc}
+                    <button onClick={() => removeStop(pc)} style={{ marginLeft: 4, opacity: 0.6 }}><I.X size={11} /></button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, gap: 8 }}>
+            <button className="btn btn-secondary" onClick={() => setStep(1)}><I.ArrowLeft size={14} /> Back</button>
+            <button className="btn btn-primary" onClick={() => setStep(3)} disabled={stops.length < 2}>
+              Continue <I.ArrowRight size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div className="card slide-up" style={{ maxWidth: 720 }}>
+          <h3 style={{ fontSize: 17, fontWeight: 600, marginBottom: 16 }}>Confirm trip</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <Detail label="Name" value={name} />
+            <Detail label="Mode" value={mode} />
+            <Detail label="Time window" value={`${startTime} – ${endTime}`} mono />
+            <Detail label="Stops" value={stops.length} mono />
+          </div>
+          <div className="divider"></div>
+          <div className="text-sm text-secondary">
+            Optimisation runs nearest-neighbour clustering, geocodes postcodes, and decides walk-vs-drive per segment.
+            Trip is saved to your dashboard automatically.
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, gap: 8 }}>
+            <button className="btn btn-secondary" onClick={() => setStep(2)}><I.ArrowLeft size={14} /> Back</button>
+            <button className="btn btn-primary btn-lg" onClick={startOptimise}>
+              <I.Zap size={16} /> Start optimising
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Detail({ label, value, mono }) {
+  return (
+    <div>
+      <div className="field-label">{label}</div>
+      <div className={mono ? 'mono fw-600' : 'fw-600'} style={{ fontSize: 15, marginTop: 4, textTransform: mono ? 'none' : 'capitalize' }}>{value}</div>
+    </div>
+  );
+}
+
+window.CreateTripPage = CreateTripPage;
