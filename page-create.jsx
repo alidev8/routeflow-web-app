@@ -10,6 +10,7 @@ function CreateTripPage({ navigate, params }) {
   const [bulk, setBulk] = React.useState('');
   const [single, setSingle] = React.useState('');
   const [stops, setStops] = React.useState([]);
+  const [weights, setWeights] = React.useState({}); // { 'CT1 1AB': 12, ... }
   const [saving, setSaving] = React.useState(false);
   const fileRef = React.useRef(null);
 
@@ -21,7 +22,15 @@ function CreateTripPage({ navigate, params }) {
     setStops((s) => Array.from(new Set([...s, ...parsed])));
     setSingle('');
   }
-  function removeStop(pc) { setStops((s) => s.filter((x) => x !== pc)); }
+  function removeStop(pc) {
+    setStops((s) => s.filter((x) => x !== pc));
+    setWeights((w) => { const n = { ...w }; delete n[pc]; return n; });
+  }
+  function setWeight(pc, kg) {
+    const n = Math.max(0, Math.min(50, Number(kg) || 0));
+    setWeights((w) => ({ ...w, [pc]: n }));
+  }
+  const totalWeightKg = Object.values(weights).reduce((a, b) => a + (Number(b) || 0), 0);
 
   function onFile(e) {
     const f = e.target.files?.[0];
@@ -55,6 +64,9 @@ function CreateTripPage({ navigate, params }) {
     setSaving(true);
     try {
       await RF.saveTrip(trip);
+      // Hold per-stop weights so the optimiser flow can splice them onto the
+      // freshly-inserted stop rows after the edge fn returns.
+      RF.setTripWeights(trip.id, weights);
       RF.pushActivity({ type: 'submit', title: 'Trip created', meta: `${stops.length} stops · ${name}` }).catch(() => {});
       navigate('optimise', { tripId: trip.id });
     } catch (e) {
@@ -184,16 +196,57 @@ function CreateTripPage({ navigate, params }) {
 
           {stops.length > 0 && (
             <div style={{ marginTop: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-                Stops ({stops.length})
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Stops ({stops.length})
+                </div>
+                <div className="text-xs text-muted">
+                  Total load: <span className="mono fw-600" style={{ color: 'var(--color-text-primary)' }}>{totalWeightKg.toFixed(1)} kg</span>
+                  <span style={{ opacity: 0.7 }}> · weights are optional and used to nudge the walk-vs-drive decision per stop</span>
+                </div>
               </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {stops.map((pc, i) => (
-                  <span key={pc} className="chip chip-muted mono" style={{ height: 28, fontSize: 12, paddingRight: 6 }}>
-                    <span style={{ color: 'var(--color-text-muted)' }}>{i + 1}.</span> {pc}
-                    <button onClick={() => removeStop(pc)} style={{ marginLeft: 4, opacity: 0.6 }}><I.X size={11} /></button>
-                  </span>
-                ))}
+              <div style={{ display: 'grid', gap: 6 }}>
+                {stops.map((pc, i) => {
+                  const kg = Number(weights[pc] || 0);
+                  const heavy = kg >= 15;
+                  return (
+                    <div key={pc}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '28px 1fr auto auto',
+                        alignItems: 'center', gap: 10,
+                        padding: '6px 10px',
+                        background: 'var(--color-surface-2)',
+                        borderRadius: 'var(--r-md)',
+                        border: heavy ? '1px solid rgba(255, 159, 10, 0.45)' : '1px solid var(--color-border)',
+                      }}>
+                      <span className="text-xs mono" style={{ color: 'var(--color-text-muted)', textAlign: 'right' }}>{i + 1}.</span>
+                      <span className="mono" style={{ fontSize: 13 }}>{pc}</span>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: heavy ? '#FF9F0A' : 'var(--color-text-secondary)' }}>
+                        <input
+                          type="number" min="0" max="50" step="0.5"
+                          value={kg || ''}
+                          onChange={(e) => setWeight(pc, e.target.value)}
+                          placeholder="0"
+                          style={{
+                            width: 56, height: 26,
+                            background: 'var(--color-surface)',
+                            border: '1px solid var(--color-border)',
+                            borderRadius: 'var(--r-sm)',
+                            color: 'var(--color-text-primary)',
+                            textAlign: 'right', padding: '0 6px',
+                            fontFamily: 'var(--font-mono)', fontSize: 12,
+                          }}
+                        />
+                        <span style={{ minWidth: 16 }}>kg</span>
+                      </label>
+                      <button onClick={() => removeStop(pc)} title="Remove"
+                        style={{ width: 26, height: 26, display: 'grid', placeItems: 'center', borderRadius: 6, opacity: 0.6 }}>
+                        <I.X size={12} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -215,6 +268,16 @@ function CreateTripPage({ navigate, params }) {
             <Detail label="Mode" value={mode} />
             <Detail label="Time window" value={`${startTime} – ${endTime}`} mono />
             <Detail label="Stops" value={stops.length} mono />
+            {totalWeightKg > 0 && (
+              <Detail label="Total load" value={`${totalWeightKg.toFixed(1)} kg`} mono />
+            )}
+            {totalWeightKg > 0 && (
+              <Detail
+                label="Heaviest drop"
+                value={`${Math.max(0, ...Object.values(weights).map((x) => Number(x) || 0)).toFixed(1)} kg`}
+                mono
+              />
+            )}
           </div>
           <div className="divider"></div>
           <div className="text-sm text-secondary">

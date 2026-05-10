@@ -47,8 +47,8 @@
 
   // ---------- DB <-> view-model mappers ----------
   function parseClusterMeta(notes) {
-    // Edge fn encodes hybrid metadata as "__rf:park_anchor=true;cluster_size=4;walk_from_park_min=3"
-    const out = { isParkAnchor: false, clusterSize: 1, walkFromParkMin: 0 };
+    // Edge fn encodes hybrid metadata as "__rf:park_anchor=true;cluster_size=4;walk_from_park_min=3;weight_kg=12"
+    const out = { isParkAnchor: false, clusterSize: 1, walkFromParkMin: 0, weightKg: 0 };
     if (!notes || !notes.startsWith('__rf:')) return out;
     const body = notes.slice(5);
     body.split(';').forEach((kv) => {
@@ -56,8 +56,17 @@
       if (k === 'park_anchor' && v === 'true') out.isParkAnchor = true;
       if (k === 'cluster_size') out.clusterSize = Math.max(1, parseInt(v, 10) || 1);
       if (k === 'walk_from_park_min') out.walkFromParkMin = Math.max(0, parseInt(v, 10) || 0);
+      if (k === 'weight_kg') out.weightKg = Math.max(0, parseFloat(v) || 0);
     });
     return out;
+  }
+  function buildClusterNotes(meta) {
+    const parts = [];
+    if (meta.isParkAnchor) parts.push('park_anchor=true');
+    if (meta.clusterSize > 1) parts.push('cluster_size=' + meta.clusterSize);
+    if (meta.walkFromParkMin > 0) parts.push('walk_from_park_min=' + meta.walkFromParkMin);
+    if (meta.weightKg > 0) parts.push('weight_kg=' + meta.weightKg);
+    return parts.length ? '__rf:' + parts.join(';') : null;
   }
 
   function dbStop(s) {
@@ -71,6 +80,7 @@
       clusterSize: meta.clusterSize,
       isParkAnchor: meta.isParkAnchor,
       walkFromParkMin: meta.walkFromParkMin,
+      weightKg: meta.weightKg,
       mode: s.mode,
       latitude: s.latitude != null ? Number(s.latitude) : null,
       longitude: s.longitude != null ? Number(s.longitude) : null,
@@ -523,6 +533,10 @@
     if (!Array.isArray(optStops) || !optStops.length) throw new Error('Optimiser returned no stops');
 
     onProgress && onProgress({ stage: 'saving', pct: 96 });
+    // Edge fn has just inserted the optimised stops; merge any per-stop
+    // weights captured at create time onto their notes column before we
+    // refresh the in-memory view-model.
+    try { await applyWeightsToStops(tripId); } catch (e) { console.warn('[RF] weight merge failed', e); }
     await refreshAll();
     onProgress && onProgress({ stage: 'done', pct: 100 });
 
@@ -536,6 +550,7 @@
       clusterSize: s.cluster_size || 1,
       isParkAnchor: !!s.is_park_anchor,
       walkFromParkMin: Number(s.walk_from_park_min || 0),
+      weightKg: Number(s.weight_kg || 0),
       mode: s.mode,
       latitude: Number(s.latitude),
       longitude: Number(s.longitude),
@@ -556,13 +571,71 @@
   async function markStopDelivered(stopId, opts = {}) {
     await requireUserId();
     if (!stopId) return;
-    const { error } = await sb.from('stops').update({
+    // Don't touch notes unless explicitly given: it carries cluster/weight
+    // metadata we need for the live-page banners.
+    const patch = {
       status: opts.status || 'delivered',
       delivered_at: new Date().toISOString(),
-      notes: opts.notes || null,
-    }).eq('id', stopId);
+    };
+    if (opts.notes !== undefined) patch.notes = opts.notes;
+    const { error } = await sb.from('stops').update(patch).eq('id', stopId);
     if (error) throw new Error(error.message);
     await refreshAll();
+  }
+
+  // Same operation but offline-aware: if the network's down (or the request
+  // fails because we just dropped into a black-spot) we queue the action and
+  // replay on reconnect. The live page calls this instead of the raw
+  // markStopDelivered so a courier in a basement isn't blocked.
+  const QUEUE_KEY = 'rf:pending-deliveries';
+  function getPendingDeliveries() {
+    try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]'); } catch { return []; }
+  }
+  function setPendingDeliveries(q) {
+    try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch {}
+    emit('queue-changed');
+  }
+  async function markStopDeliveredQueued(stopId, opts = {}) {
+    if (!stopId) return { queued: false };
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      const q = getPendingDeliveries();
+      q.push({ stopId, opts, ts: Date.now() });
+      setPendingDeliveries(q);
+      return { queued: true };
+    }
+    try {
+      await markStopDelivered(stopId, opts);
+      return { queued: false };
+    } catch (e) {
+      if ((typeof navigator !== 'undefined' && navigator.onLine === false)
+          || /network|fetch|timeout/i.test(e?.message || '')) {
+        const q = getPendingDeliveries();
+        q.push({ stopId, opts, ts: Date.now() });
+        setPendingDeliveries(q);
+        return { queued: true, error: e };
+      }
+      throw e;
+    }
+  }
+  async function flushPendingDeliveries() {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return 0;
+    const q = getPendingDeliveries();
+    if (!q.length) return 0;
+    const remaining = [];
+    let flushed = 0;
+    for (const item of q) {
+      try { await markStopDelivered(item.stopId, item.opts); flushed += 1; }
+      catch { remaining.push(item); }
+    }
+    setPendingDeliveries(remaining);
+    return flushed;
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', () => {
+      flushPendingDeliveries().catch(() => {});
+      emit('online-changed');
+    });
+    window.addEventListener('offline', () => emit('online-changed'));
   }
 
   // ---------- Driver position ----------
@@ -757,6 +830,97 @@
     return () => window.removeEventListener('rf:ready', handler);
   }
 
+  // ---------- Weights side-channel ----------
+  // The optimise edge fn doesn't know about per-stop package weight yet, so we
+  // hold the user's input here, flush it onto the freshly-inserted stop rows
+  // *after* the edge fn writes them, and re-encode any cluster meta the edge
+  // fn put in the notes column. Cached in localStorage keyed by tripId so a
+  // page reload between create and optimise doesn't lose it.
+  const _weightsByTrip = new Map();
+  function setTripWeights(tripId, weights) {
+    if (!tripId) return;
+    _weightsByTrip.set(tripId, weights || {});
+    try { localStorage.setItem('rf:weights:' + tripId, JSON.stringify(weights || {})); } catch {}
+  }
+  function getTripWeights(tripId) {
+    if (!tripId) return {};
+    if (_weightsByTrip.has(tripId)) return _weightsByTrip.get(tripId);
+    try {
+      const w = JSON.parse(localStorage.getItem('rf:weights:' + tripId) || '{}');
+      _weightsByTrip.set(tripId, w);
+      return w;
+    } catch { return {}; }
+  }
+  async function applyWeightsToStops(tripId) {
+    const weights = getTripWeights(tripId);
+    const pcs = Object.keys(weights).filter((p) => Number(weights[p]) > 0);
+    if (!pcs.length) return;
+    const { data: rows } = await sb.from('stops').select('id, postcode, notes').eq('trip_id', tripId);
+    if (!rows?.length) return;
+    for (const r of rows) {
+      const w = Number(weights[r.postcode] || 0);
+      if (w <= 0) continue;
+      const meta = parseClusterMeta(r.notes);
+      meta.weightKg = w;
+      const newNotes = buildClusterNotes(meta);
+      if (newNotes !== r.notes) {
+        await sb.from('stops').update({ notes: newNotes }).eq('id', r.id);
+      }
+    }
+  }
+
+  // ---------- Real-time mode decision (Routes API v2 + traffic) ----------
+  // After every delivery the live page asks: is the *planned* mode for the
+  // next stop still the right one given current GPS, current van location,
+  // and live traffic? Returns null if anything is missing or the call fails.
+  async function decideMode({ from, van, to, parkingBufferSec = 90 }) {
+    if (!GOOGLE_MAPS_KEY || !from || !to || from.lat == null || to.lat == null) return null;
+    function buildBody(origin, mode) {
+      const body = {
+        origin: { location: { latLng: { latitude: Number(origin.lat), longitude: Number(origin.lng) } } },
+        destination: { location: { latLng: { latitude: Number(to.lat), longitude: Number(to.lng) } } },
+        travelMode: mode,
+      };
+      if (mode === 'DRIVE') body.routingPreference = 'TRAFFIC_AWARE_OPTIMAL';
+      return body;
+    }
+    async function callOne(origin, mode) {
+      try {
+        const r = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': GOOGLE_MAPS_KEY,
+            'X-Goog-FieldMask': 'routes.duration,routes.distanceMeters',
+          },
+          body: JSON.stringify(buildBody(origin, mode)),
+        });
+        if (!r.ok) return null;
+        const j = await r.json();
+        const route = j.routes && j.routes[0];
+        if (!route) return null;
+        const sec = parseInt(String(route.duration || '0s').replace('s', ''), 10) || 0;
+        return { sec, m: Number(route.distanceMeters || 0) };
+      } catch { return null; }
+    }
+    const [walk, drive] = await Promise.all([
+      callOne(from, 'WALK'),
+      van && van.lat != null ? callOne(van, 'DRIVE') : Promise.resolve(null),
+    ]);
+    if (!walk && !drive) return null;
+    if (!drive) return { recommended: 'walking', walkSec: walk.sec, walkM: walk.m, driveSec: null, driveM: null, deltaSec: 0 };
+    if (!walk)  return { recommended: 'driving', walkSec: null, walkM: null, driveSec: drive.sec, driveM: drive.m, deltaSec: 0 };
+    const driveTotalSec = drive.sec + parkingBufferSec;
+    const recommended = walk.sec <= driveTotalSec ? 'walking' : 'driving';
+    return {
+      recommended,
+      walkSec: walk.sec, walkM: walk.m,
+      driveSec: drive.sec, driveM: drive.m,
+      parkingBufferSec,
+      deltaSec: Math.abs(walk.sec - driveTotalSec),
+    };
+  }
+
   // ---------- Postcode parsing ----------
   const PC_RX = /([A-Z]{1,2}[0-9][A-Z0-9]?\s*[0-9][A-Z]{2})/gi;
   function parsePostcodes(text) {
@@ -804,10 +968,14 @@
   window.RF = {
     signUp, signIn, signOut, getCurrentUser,
     getTrips, getTrip, saveTrip, deleteTrip, clearAllTrips,
-    markStopDelivered, updateDriverPosition,
+    markStopDelivered, markStopDeliveredQueued, updateDriverPosition,
+    getPendingDeliveries, flushPendingDeliveries,
     getActivity, pushActivity,
     optimiseRoute, parsePostcodes, geocodeBatch, mockGeocode,
     updateProfile,
+    setTripWeights, getTripWeights,
+    decideMode,
+    isOnline: () => typeof navigator === 'undefined' || navigator.onLine !== false,
     uid, subscribe, isReady, onReady,
     admin: {
       fetchUsers: adminFetchUsers,

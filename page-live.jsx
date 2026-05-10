@@ -8,6 +8,26 @@ function LivePage({ navigate, params }) {
   const [now, setNow] = React.useState(new Date());
   const [me, setMe] = React.useState(null);   // simulated driver position
   const [tracking, setTracking] = React.useState(true);
+  const [decision, setDecision] = React.useState(null);     // last RF.decideMode result
+  const [dismissed, setDismissed] = React.useState(false);  // user dismissed the suggestion banner
+  const [online, setOnline] = React.useState(typeof navigator === 'undefined' ? true : navigator.onLine !== false);
+  const [pending, setPending] = React.useState(() => (RF.getPendingDeliveries ? RF.getPendingDeliveries().length : 0));
+
+  React.useEffect(() => {
+    const onOn = () => setOnline(true);
+    const onOff = () => setOnline(false);
+    const onQueue = () => setPending(RF.getPendingDeliveries ? RF.getPendingDeliveries().length : 0);
+    window.addEventListener('online', onOn);
+    window.addEventListener('offline', onOff);
+    window.addEventListener('rf:queue-changed', onQueue);
+    window.addEventListener('rf:online-changed', onQueue);
+    return () => {
+      window.removeEventListener('online', onOn);
+      window.removeEventListener('offline', onOff);
+      window.removeEventListener('rf:queue-changed', onQueue);
+      window.removeEventListener('rf:online-changed', onQueue);
+    };
+  }, []);
 
   React.useEffect(() => {
     const t = RF.getTrip(params?.tripId);
@@ -67,14 +87,25 @@ function LivePage({ navigate, params }) {
     return () => { if (watchId != null) navigator.geolocation.clearWatch(watchId); clearInterval(sim); };
   }, [tracking, current, stops]);
 
-  function markDelivered() {
+  async function markDelivered() {
     const s = stops[current];
     setStops((arr) => arr.map((x, i) => i === current ? { ...x, status: 'delivered' } : x));
-    if (s?.id) RF.markStopDelivered(s.id).catch(() => {});
+    setDismissed(false);
+    setDecision(null);
+    if (s?.id) {
+      try {
+        const res = await RF.markStopDeliveredQueued(s.id);
+        if (res?.queued) toast('Saved offline - will sync when back online', 'info');
+      } catch (e) {
+        toast(e?.message || 'Could not save delivery', 'error');
+      }
+    }
     if (current < stops.length - 1) {
       setCurrent((c) => c + 1);
-      toast('Stop delivered', 'success');
-      RF.pushActivity({ type: 'submit', title: 'Stop delivered', meta: s?.postcode, tripId: params?.tripId });
+      if (!(typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        toast('Stop delivered', 'success');
+      }
+      RF.pushActivity({ type: 'submit', title: 'Stop delivered', meta: s?.postcode, tripId: params?.tripId }).catch(() => {});
     } else {
       complete();
     }
@@ -88,14 +119,15 @@ function LivePage({ navigate, params }) {
     navigate('summary', { tripId: trip.id });
   }
 
-  function navigateExternal() {
+  function navigateExternal(modeOverride) {
     const cur = stops[current];
     if (!cur) return;
     // Build a Google Maps deep link. Prefer lat/lng for accuracy; postcode as fallback.
     const dest = (cur.latitude != null && cur.longitude != null)
       ? `${cur.latitude},${cur.longitude}`
       : encodeURIComponent(cur.postcode);
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${dest}&travelmode=${cur.mode === 'walking' ? 'walking' : 'driving'}`;
+    const m = (modeOverride || cur.mode) === 'walking' ? 'walking' : 'driving';
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${dest}&travelmode=${m}`;
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
@@ -147,6 +179,56 @@ function LivePage({ navigate, params }) {
     ? metresBetween(me, { lat: Number(activeParkAnchor.latitude), lng: Number(activeParkAnchor.longitude) })
     : null;
 
+  // Heavy-load override: if the next walking drop is heavy, suggest driving
+  // even if the planner picked walking. Threshold scales with distance.
+  const heavyWalkWarning = (() => {
+    if (!cur || cur.mode !== 'walking') return null;
+    const kg = Number(cur.weightKg || 0);
+    if (kg < 12) return null;
+    // 12-18kg: warn only if walk leg > 60s; 18kg+: always warn.
+    const walkSec = (cur.selectedTime || cur.walkingTime || 0) * 60;
+    if (kg < 18 && walkSec < 60) return null;
+    return { kg, walkSec };
+  })();
+
+  // Adaptive traffic-aware re-decide on each delivery / current-stop change.
+  // Calls Routes API v2 with TRAFFIC_AWARE_OPTIMAL via store.js. We only run
+  // when we have a real GPS fix (avoids spurious suggestions during the demo
+  // simulation tick) and when the next stop has coordinates.
+  React.useEffect(() => {
+    if (!cur || !me || me.source !== 'gps') return;
+    if (cur.latitude == null) return;
+    let cancelled = false;
+    const van = activeParkAnchor && activeParkAnchor.latitude != null
+      ? { lat: Number(activeParkAnchor.latitude), lng: Number(activeParkAnchor.longitude) }
+      : null;
+    RF.decideMode({
+      from: { lat: me.lat, lng: me.lng },
+      van,
+      to: { lat: Number(cur.latitude), lng: Number(cur.longitude) },
+    })
+      .then((res) => { if (!cancelled) setDecision(res); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [current, cur?.id, me?.source]);
+
+  // Did the live decision flip the planned mode? (Only flag meaningful
+  // savings: at least 45s difference, otherwise it's noise.)
+  const decisionFlip = (decision && cur && !dismissed
+    && decision.recommended && decision.recommended !== cur.mode
+    && decision.deltaSec >= 45) ? decision : null;
+
+  function fmtSec(s) {
+    if (s == null) return '—';
+    if (s < 90) return `${Math.round(s)}s`;
+    return `${Math.round(s / 60)} min`;
+  }
+  function fmtMetres(m) {
+    if (m == null) return '—';
+    if (m < 1000) return `${Math.round(m)} m`;
+    return `${(m / 1000).toFixed(2)} km`;
+  }
+
   return (
     <div className="live-shell">
       <div className="live-header">
@@ -161,7 +243,27 @@ function LivePage({ navigate, params }) {
             <div className="big mono">{remaining}/{stops.length}</div>
           </div>
         </div>
-        <div className="live-header-card" style={{ flex: '0 0 auto', padding: '10px 12px' }}>
+        <div className="live-header-card" style={{ flex: '0 0 auto', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {!online && (
+            <span title="Offline - deliveries will sync when back online" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              fontSize: 10, fontWeight: 700, letterSpacing: '0.04em',
+              padding: '3px 7px', borderRadius: 999,
+              background: 'rgba(255, 159, 10, 0.18)', color: '#FF9F0A',
+              border: '1px solid rgba(255, 159, 10, 0.45)',
+            }}>
+              <span style={{ width: 6, height: 6, borderRadius: 3, background: '#FF9F0A' }}></span>
+              OFFLINE
+            </span>
+          )}
+          {pending > 0 && (
+            <span title={`${pending} delivery write${pending === 1 ? '' : 's'} queued for sync`} style={{
+              fontSize: 10, fontWeight: 700,
+              padding: '3px 7px', borderRadius: 999,
+              background: 'rgba(10, 132, 255, 0.18)', color: 'var(--color-accent)',
+              border: '1px solid rgba(10, 132, 255, 0.40)',
+            }}>{pending} queued</span>
+          )}
           <div className="mono fw-600" style={{ fontSize: 13 }}>
             {now.getHours().toString().padStart(2, '0')}:{now.getMinutes().toString().padStart(2, '0')}
           </div>
@@ -184,6 +286,87 @@ function LivePage({ navigate, params }) {
 
         {cur && (
           <div>
+            {decisionFlip && (
+              <div style={{
+                background: decisionFlip.recommended === 'driving'
+                  ? 'linear-gradient(135deg, rgba(10,132,255,0.18), rgba(10,132,255,0.06))'
+                  : 'linear-gradient(135deg, rgba(48,209,88,0.18), rgba(48,209,88,0.06))',
+                border: decisionFlip.recommended === 'driving'
+                  ? '1px solid rgba(10,132,255,0.45)' : '1px solid rgba(48,209,88,0.45)',
+                borderRadius: 'var(--r-md)',
+                padding: '12px 14px',
+                marginBottom: 12,
+                display: 'flex', alignItems: 'flex-start', gap: 10,
+              }}>
+                <div style={{ width: 30, height: 30, borderRadius: 9,
+                  background: decisionFlip.recommended === 'driving' ? 'rgba(10,132,255,0.28)' : 'rgba(48,209,88,0.28)',
+                  display: 'grid', placeItems: 'center', flex: '0 0 auto' }}>
+                  {decisionFlip.recommended === 'driving' ? <I.Car size={14} /> : <I.Walk size={14} />}
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="fw-700" style={{ fontSize: 13 }}>
+                    Live traffic suggests {decisionFlip.recommended} this leg
+                  </div>
+                  <div className="text-xs text-secondary" style={{ marginTop: 2 }}>
+                    Plan said <b>{cur.mode}</b> · live check via Routes API:
+                    {' '}walk {fmtSec(decisionFlip.walkSec)} ({fmtMetres(decisionFlip.walkM)}),
+                    {' '}drive {fmtSec(decisionFlip.driveSec)} ({fmtMetres(decisionFlip.driveM)})
+                    {decisionFlip.parkingBufferSec ? ` + ${decisionFlip.parkingBufferSec}s parking` : ''}.
+                    {' '}<b>Saves ~{fmtSec(decisionFlip.deltaSec)}.</b>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button onClick={() => navigateExternal(decisionFlip.recommended === 'driving' ? 'driving' : 'walking')}
+                      style={{
+                        background: decisionFlip.recommended === 'driving' ? 'var(--color-accent)' : '#30D158',
+                        color: decisionFlip.recommended === 'driving' ? '#fff' : '#052013',
+                        padding: '7px 12px', fontSize: 12, fontWeight: 700,
+                        borderRadius: 'var(--r-sm)', border: 'none',
+                      }}>
+                      Switch to {decisionFlip.recommended} →
+                    </button>
+                    <button onClick={() => setDismissed(true)}
+                      style={{ padding: '7px 10px', fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                      Keep plan
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {heavyWalkWarning && !decisionFlip && (
+              <div style={{
+                background: 'rgba(255, 159, 10, 0.10)',
+                border: '1px solid rgba(255, 159, 10, 0.35)',
+                borderRadius: 'var(--r-md)',
+                padding: '10px 14px',
+                marginBottom: 12,
+                display: 'flex', alignItems: 'center', gap: 10,
+              }}>
+                <div style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(255, 159, 10, 0.20)', display: 'grid', placeItems: 'center' }}>
+                  <I.Info size={14} stroke="#FF9F0A" />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="fw-700" style={{ fontSize: 13 }}>Heavy load on this drop</div>
+                  <div className="text-xs text-secondary">
+                    {heavyWalkWarning.kg.toFixed(1)} kg over {(heavyWalkWarning.walkSec / 60).toFixed(1)} min walk.
+                    {' '}Consider driving — tap the blue arrow above to override.
+                  </div>
+                </div>
+                <button onClick={() => navigateExternal('driving')}
+                  style={{
+                    background: 'var(--color-accent)', color: '#fff',
+                    padding: '6px 10px', fontSize: 11, fontWeight: 700,
+                    borderRadius: 'var(--r-sm)',
+                  }}>
+                  Drive instead
+                </button>
+              </div>
+            )}
+            {cur.weightKg > 0 && !heavyWalkWarning && (
+              <div className="text-xs text-muted" style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 6, height: 6, borderRadius: 3, background: 'var(--color-text-muted)' }}></span>
+                Package: {Number(cur.weightKg).toFixed(1)} kg
+              </div>
+            )}
             {cur.isParkAnchor && cur.clusterSize > 1 && (
               <div style={{
                 background: 'linear-gradient(135deg, rgba(255,159,10,0.18), rgba(255,159,10,0.06))',
@@ -276,11 +459,72 @@ function LivePage({ navigate, params }) {
               {cur.reasoning}
             </div>
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-              <button className="btn btn-secondary" onClick={navigateExternal} style={{ flex: 1 }}>
-                <I.Map size={14} /> Navigate
+            {(() => {
+              // Primary action: a big mode-aware CTA that launches external
+              // navigation in the right travel mode. Colour + label come from
+              // the current planned mode + the cluster context.
+              let label, sub, bg, fg, border, Icon, mode;
+              if (cur.mode === 'walking') {
+                mode = 'walking';
+                Icon = I.Walk;
+                if (isLastWalkInCluster) {
+                  label = `WALK TO ${cur.postcode}`;
+                  sub = activeParkAnchor
+                    ? `Last drop · then walk back to van at ${activeParkAnchor.postcode}`
+                    : 'Last drop in this cluster';
+                  bg = 'linear-gradient(180deg, #FF9F0A, #C77600)'; fg = '#0a0a0c';
+                  border = '1px solid #FF9F0A';
+                } else {
+                  label = `WALK TO ${cur.postcode}`;
+                  sub = activeParkAnchor ? `Van parked at ${activeParkAnchor.postcode}` : 'On foot from your last drop';
+                  bg = 'linear-gradient(180deg, #30D158, #1F9F40)'; fg = '#052013';
+                  border = '1px solid #30D158';
+                }
+              } else {
+                mode = 'driving';
+                Icon = I.Car;
+                label = `DRIVE TO ${cur.postcode}`;
+                sub = `${cur.distanceFromPrevious || 0} km · ${cur.selectedTime || 0} min planned`;
+                bg = 'linear-gradient(180deg, #0A84FF, #0961C7)'; fg = '#fff';
+                border = '1px solid #0A84FF';
+              }
+              return (
+                <button onClick={() => navigateExternal(mode)}
+                  style={{
+                    width: '100%', marginTop: 14,
+                    background: bg, color: fg, border,
+                    borderRadius: 'var(--r-lg)', padding: '14px 18px',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    fontWeight: 800, letterSpacing: '0.01em',
+                    boxShadow: '0 6px 18px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.18)',
+                    cursor: 'pointer',
+                  }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                    <span style={{ width: 36, height: 36, borderRadius: 10, background: 'rgba(0,0,0,0.18)', display: 'grid', placeItems: 'center' }}>
+                      <Icon size={18} stroke={fg} />
+                    </span>
+                    <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 0 }}>
+                      <span style={{ fontSize: 16, lineHeight: '20px' }}>{label}</span>
+                      <span style={{ fontSize: 11, opacity: 0.85, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '60vw' }}>{sub}</span>
+                    </span>
+                  </span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, opacity: 0.85 }}>
+                    OPEN MAPS <I.ArrowRight size={14} stroke={fg} />
+                  </span>
+                </button>
+              );
+            })()}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '44px 1fr', gap: 8, marginTop: 8 }}>
+              <button onClick={() => navigateExternal()} title="Open in Maps (planned mode)"
+                style={{
+                  background: 'var(--color-surface-2)', border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--r-md)', display: 'grid', placeItems: 'center',
+                  height: 44,
+                }}>
+                <I.Map size={16} />
               </button>
-              <button className="btn btn-primary" onClick={markDelivered} style={{ flex: 1.5 }}>
+              <button className="btn btn-primary" onClick={markDelivered} style={{ height: 44 }}>
                 <I.Check size={14} /> Mark delivered
               </button>
             </div>
