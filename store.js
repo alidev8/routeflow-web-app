@@ -47,14 +47,15 @@
 
   // ---------- DB <-> view-model mappers ----------
   function parseClusterMeta(notes) {
-    // Edge fn encodes hybrid metadata as "__rf:park_anchor=true;cluster_size=4"
-    const out = { isParkAnchor: false, clusterSize: 1 };
+    // Edge fn encodes hybrid metadata as "__rf:park_anchor=true;cluster_size=4;walk_from_park_min=3"
+    const out = { isParkAnchor: false, clusterSize: 1, walkFromParkMin: 0 };
     if (!notes || !notes.startsWith('__rf:')) return out;
     const body = notes.slice(5);
     body.split(';').forEach((kv) => {
       const [k, v] = kv.split('=');
       if (k === 'park_anchor' && v === 'true') out.isParkAnchor = true;
       if (k === 'cluster_size') out.clusterSize = Math.max(1, parseInt(v, 10) || 1);
+      if (k === 'walk_from_park_min') out.walkFromParkMin = Math.max(0, parseInt(v, 10) || 0);
     });
     return out;
   }
@@ -69,6 +70,7 @@
       clusterId: s.cluster_id,
       clusterSize: meta.clusterSize,
       isParkAnchor: meta.isParkAnchor,
+      walkFromParkMin: meta.walkFromParkMin,
       mode: s.mode,
       latitude: s.latitude != null ? Number(s.latitude) : null,
       longitude: s.longitude != null ? Number(s.longitude) : null,
@@ -533,6 +535,7 @@
       clusterId: s.cluster_id,
       clusterSize: s.cluster_size || 1,
       isParkAnchor: !!s.is_park_anchor,
+      walkFromParkMin: Number(s.walk_from_park_min || 0),
       mode: s.mode,
       latitude: Number(s.latitude),
       longitude: Number(s.longitude),
@@ -545,6 +548,7 @@
       status: s.status,
     }));
     mapped.skipped = Array.isArray(data.skipped) ? data.skipped : [];
+    mapped.clusters = Array.isArray(data.clusters) ? data.clusters : [];
     return mapped;
   }
 

@@ -104,6 +104,49 @@ function LivePage({ navigate, params }) {
   const remaining = stops.length - current - (cur?.status === 'delivered' ? 1 : 0);
   const sheetH = expanded ? '60vh' : '38vh';
 
+  // The "parked van" while the driver is in a cluster: most recent park-anchor
+  // stop in the same cluster as the current stop. Only meaningful when the
+  // cluster actually involves walking (size > 1) - a "cluster" of 1 is just a
+  // drive-up drop and doesn't need a separate van marker.
+  const activeParkAnchor = (() => {
+    if (!cur || (cur.clusterSize || 1) <= 1) return null;
+    if (cur.isParkAnchor) return cur;
+    for (let i = current; i >= 0; i--) {
+      if (stops[i].clusterId === cur.clusterId && stops[i].isParkAnchor) return stops[i];
+    }
+    return null;
+  })();
+
+  // Walking radius for the active cluster - take the worst walk_from_park_min
+  // across walking stops in the cluster. Falls back to 0 when the backend
+  // hasn't shipped the per-stop walk distance yet (older edge fn version).
+  const parkRadiusMin = activeParkAnchor
+    ? Math.max(0, ...stops.filter((s) => s.clusterId === activeParkAnchor.clusterId).map((s) => s.walkFromParkMin || 0))
+    : 0;
+
+  // Last walking stop in the current cluster? After this drop the driver
+  // walks back to the parked van before any drive-on.
+  const isLastWalkInCluster = !!cur && cur.mode === 'walking' &&
+    (cur.clusterSize || 1) > 1 &&
+    (current === stops.length - 1 || stops[current + 1]?.clusterId !== cur.clusterId);
+  const returnWalkMin = cur?.walkFromParkMin || 0;
+
+  // Haversine in metres - used for the live "X m from the van" chip while the
+  // driver is walking inside a cluster. Cheap; runs each render with `me`.
+  function metresBetween(a, b) {
+    if (!a || !b || a.lat == null || b.lat == null) return null;
+    const R = 6371000;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(b.lat - a.lat);
+    const dLng = toRad(b.lng - a.lng);
+    const s = Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return Math.round(2 * R * Math.asin(Math.sqrt(s)));
+  }
+  const liveVanDistanceM = (cur?.mode === 'walking' && !cur?.isParkAnchor && activeParkAnchor && me)
+    ? metresBetween(me, { lat: Number(activeParkAnchor.latitude), lng: Number(activeParkAnchor.longitude) })
+    : null;
+
   return (
     <div className="live-shell">
       <div className="live-header">
@@ -126,7 +169,14 @@ function LivePage({ navigate, params }) {
       </div>
 
       <div className="live-map">
-        <RFUI.FakeMap stops={stops} current={current} me={me} height="100%" />
+        <RFUI.FakeMap
+          stops={stops}
+          current={current}
+          me={me}
+          parkAnchor={activeParkAnchor}
+          parkRadiusMin={parkRadiusMin}
+          height="100%"
+        />
       </div>
 
       <div className="bottom-sheet" style={{ maxHeight: sheetH, overflowY: 'auto', transition: 'max-height 0.3s ease' }}>
@@ -134,7 +184,7 @@ function LivePage({ navigate, params }) {
 
         {cur && (
           <div>
-            {cur.isParkAnchor && (
+            {cur.isParkAnchor && cur.clusterSize > 1 && (
               <div style={{
                 background: 'linear-gradient(135deg, rgba(255,159,10,0.18), rgba(255,159,10,0.06))',
                 border: '1px solid rgba(255,159,10,0.45)',
@@ -146,7 +196,56 @@ function LivePage({ navigate, params }) {
                 <div style={{ width: 28, height: 28, borderRadius: 8, background: '#FF9F0A', display: 'grid', placeItems: 'center', fontWeight: 800, color: '#0a0a0c' }}>P</div>
                 <div style={{ minWidth: 0 }}>
                   <div className="fw-700" style={{ fontSize: 14 }}>Park here</div>
-                  <div className="text-xs text-secondary">Walk to {cur.clusterSize - 1} more drop{cur.clusterSize - 1 === 1 ? '' : 's'} in this cluster, then return to the vehicle.</div>
+                  <div className="text-xs text-secondary">
+                    {cur.clusterSize - 1} more drop{cur.clusterSize - 1 === 1 ? '' : 's'} on foot
+                    {parkRadiusMin > 0 ? ` within ~${parkRadiusMin} min walk` : ' nearby'}.
+                    {' '}Loop back to the van after the last drop.
+                  </div>
+                </div>
+              </div>
+            )}
+            {cur.mode === 'walking' && !cur.isParkAnchor && activeParkAnchor && (
+              <div style={{
+                background: 'rgba(48, 209, 88, 0.10)',
+                border: '1px solid rgba(48, 209, 88, 0.30)',
+                borderRadius: 'var(--r-md)',
+                padding: '10px 14px',
+                marginBottom: 12,
+                display: 'flex', alignItems: 'center', gap: 10,
+              }}>
+                <div style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(48, 209, 88, 0.20)', display: 'grid', placeItems: 'center' }}>
+                  <I.Walk size={14} stroke="#30D158" />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="fw-700" style={{ fontSize: 13 }}>Walking from your van</div>
+                  <div className="text-xs text-secondary">
+                    Van parked at <b>{activeParkAnchor.postcode}</b>
+                    {cur.walkFromParkMin > 0 && <> · ~{cur.walkFromParkMin}m walk from there</>}
+                    {liveVanDistanceM != null && <> · <b>{liveVanDistanceM < 1000 ? `${liveVanDistanceM} m` : `${(liveVanDistanceM/1000).toFixed(2)} km`}</b> away now</>}
+                  </div>
+                </div>
+              </div>
+            )}
+            {isLastWalkInCluster && (
+              <div style={{
+                background: 'rgba(10, 132, 255, 0.10)',
+                border: '1px solid rgba(10, 132, 255, 0.30)',
+                borderRadius: 'var(--r-md)',
+                padding: '10px 14px',
+                marginBottom: 12,
+                display: 'flex', alignItems: 'center', gap: 10,
+              }}>
+                <div style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(10, 132, 255, 0.20)', display: 'grid', placeItems: 'center' }}>
+                  <I.Car size={14} stroke="var(--color-accent)" />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div className="fw-700" style={{ fontSize: 13 }}>Last drop in this cluster</div>
+                  <div className="text-xs text-secondary">
+                    After "Mark delivered", walk back to your van
+                    {activeParkAnchor ? <> at <b>{activeParkAnchor.postcode}</b></> : null}
+                    {returnWalkMin > 0 && <> (~{returnWalkMin} min)</>}
+                    {' '}before driving on.
+                  </div>
                 </div>
               </div>
             )}

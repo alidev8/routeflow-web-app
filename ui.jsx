@@ -164,12 +164,14 @@ async function runWithConcurrency(items, limit, worker) {
 }
 
 // --- Real map (Google Maps JS API) ---
-function FakeMap({ stops = [], current = -1, me = null, height = 320, withLabels = false, interactive = true }) {
+function FakeMap({ stops = [], current = -1, me = null, parkAnchor = null, parkRadiusMin = 0, height = 320, withLabels = false, interactive = true }) {
   const ref = React.useRef(null);
   const mapRef = React.useRef(null);
   const markersRef = React.useRef([]);
   const polysRef = React.useRef([]);
   const meMarkerRef = React.useRef(null);
+  const parkMarkerRef = React.useRef(null);
+  const parkCircleRef = React.useRef(null);
   const directionsServiceRef = React.useRef(null);
   const drawTokenRef = React.useRef(0);
   const [error, setError] = React.useState(null);
@@ -326,6 +328,48 @@ function FakeMap({ stops = [], current = -1, me = null, height = 320, withLabels
       });
     });
   }, [stops, current]);
+
+  // Parked van overlay - shows the cluster anchor while the driver is doing
+  // walking deliveries inside the cluster. Includes a translucent walking
+  // radius so the driver sees how far each remaining drop is from the van.
+  React.useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !window.google?.maps) return;
+    const maps = window.google.maps;
+
+    // Always tear down before redrawing so a cluster change cleans up.
+    if (parkMarkerRef.current) { parkMarkerRef.current.setMap(null); parkMarkerRef.current = null; }
+    if (parkCircleRef.current) { parkCircleRef.current.setMap(null); parkCircleRef.current = null; }
+
+    if (!parkAnchor || parkAnchor.latitude == null) return;
+    const pos = { lat: Number(parkAnchor.latitude), lng: Number(parkAnchor.longitude) };
+    const vanSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="34" height="34" viewBox="0 0 34 34">
+      <circle cx="17" cy="17" r="14" fill="#FF9F0A" stroke="#fff" stroke-width="3"/>
+      <path d="M11 13h8l2 4v3h-1.5a1.5 1.5 0 0 1-3 0H14a1.5 1.5 0 0 1-3 0H10v-6z" fill="#0a0a0c"/>
+      <circle cx="13" cy="20.5" r="1.4" fill="#fff"/>
+      <circle cx="19" cy="20.5" r="1.4" fill="#fff"/>
+    </svg>`;
+    parkMarkerRef.current = new maps.Marker({
+      position: pos, map,
+      icon: {
+        url: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(vanSvg),
+        scaledSize: new maps.Size(34, 34),
+        anchor: new maps.Point(17, 17),
+      },
+      title: `Parked van - ${parkAnchor.postcode}`,
+      zIndex: 750,
+    });
+    if (parkRadiusMin > 0) {
+      // ~80 m per walking minute (1.3 m/s). Pad slightly for visual hint.
+      const radiusM = Math.max(120, Math.round(parkRadiusMin * 80 * 1.1));
+      parkCircleRef.current = new maps.Circle({
+        center: pos, radius: radiusM, map,
+        fillColor: '#FF9F0A', fillOpacity: 0.08,
+        strokeColor: '#FF9F0A', strokeOpacity: 0.45, strokeWeight: 1.5,
+        clickable: false,
+      });
+    }
+  }, [parkAnchor, parkRadiusMin]);
 
   // Driver position marker
   React.useEffect(() => {
