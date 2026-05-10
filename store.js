@@ -1,8 +1,19 @@
-// RouteFlow data layer - Supabase as the only source of truth.
-// No localStorage caching of business data. In-memory state only,
-// kept fresh by Supabase Realtime channels. Pages still call the
-// existing RF.* sync getters; they read the in-memory state, which
-// is populated as soon as the session resolves on boot.
+// RouteFlow data layer - Supabase as the source of truth.
+//
+// Pages talk to the in-memory `trips` / `activity` arrays via the RF.*
+// sync getters; those arrays are populated by fetchTrips/fetchActivity
+// on boot and kept fresh by Supabase Realtime channels (debounced so
+// bulk inserts don't stampede the connection pool).
+//
+// localStorage is used only for two things, both well-scoped:
+//   1. `rf:pending-deliveries` - offline write queue. Mark-delivered taps
+//      that fire while navigator.onLine === false are stashed here and
+//      replayed automatically on the next 'online' event.
+//   2. `rf:weights:<tripId>` - per-stop package weights the user typed
+//      in the create wizard. The optimise edge fn doesn't accept weight
+//      yet, so we splice them into the resulting stop rows ourselves.
+// Critical writes go through directRest() (cached access token, no SDK)
+// to dodge the supabase-js auto-refresh hang on slow connections.
 
 (function () {
   // ---------- config ----------
@@ -1181,34 +1192,6 @@
     return out;
   }
 
-  // Minimal geocode helpers retained for the FakeMap preview.
-  function hashStr(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h); }
-  function mockGeocode(pc) {
-    const h = hashStr(pc);
-    return { lat: 51.27 + ((h % 1000) / 1000) * 0.06, lng: 1.07 + (((h >> 7) % 1000) / 1000) * 0.06 };
-  }
-  async function geocodeBatch(postcodes) {
-    const out = {};
-    try {
-      const res = await fetch('https://api.postcodes.io/postcodes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ postcodes }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        (data.result || []).forEach((r) => {
-          if (r.result) {
-            const place = `${r.result.parish || r.result.admin_ward || ''}, ${r.result.admin_district || ''}`.replace(/^,\s*/, '');
-            out[r.query] = { lat: r.result.latitude, lng: r.result.longitude, place };
-          }
-        });
-      }
-    } catch {}
-    postcodes.forEach((p) => { if (!out[p]) out[p] = { ...mockGeocode(p), place: 'Approx. location' }; });
-    return out;
-  }
-
   // ---------- Public RF surface ----------
   window.RF = {
     signUp, signIn, signOut, getCurrentUser,
@@ -1216,7 +1199,7 @@
     markStopDelivered, markStopDeliveredQueued, updateDriverPosition,
     getPendingDeliveries, flushPendingDeliveries,
     getActivity, pushActivity,
-    optimiseRoute, parsePostcodes, geocodeBatch, mockGeocode,
+    optimiseRoute, parsePostcodes,
     updateProfile,
     setTripWeights, getTripWeights,
     decideMode,
@@ -1230,13 +1213,11 @@
       deleteTrip: adminDeleteTrip,
       promoteUser: adminPromoteUser,
     },
-    _supabase: sb,
     cloud: {
       configured: true,
       url: SUPABASE_URL,
       label: 'Cloud sync · live',
       info: 'Trips, activity, and live driver position sync via Supabase Realtime.',
-      googleMapsKey: GOOGLE_MAPS_KEY,
     },
   };
 

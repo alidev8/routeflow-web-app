@@ -164,7 +164,7 @@ async function runWithConcurrency(items, limit, worker) {
 }
 
 // --- Real map (Google Maps JS API) ---
-function FakeMap({ stops = [], current = -1, me = null, parkAnchor = null, parkRadiusMin = 0, height = 320, withLabels = false, interactive = true }) {
+function RouteMap({ stops = [], current = -1, me = null, parkAnchor = null, parkRadiusMin = 0, height = 320, withLabels = false, interactive = true }) {
   const ref = React.useRef(null);
   const mapRef = React.useRef(null);
   const markersRef = React.useRef([]);
@@ -421,4 +421,4 @@ function FakeMap({ stops = [], current = -1, me = null, parkAnchor = null, parkR
   );
 }
 
-window.RFUI = { ToastProvider, useToast, Sidebar, MobileHeader, FakeMap };
+window.RFUI = { ToastProvider, useToast, Sidebar, MobileHeader, RouteMap };

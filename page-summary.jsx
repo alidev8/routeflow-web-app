@@ -59,7 +59,7 @@ function SummaryPage({ navigate, params }) {
             <div className="fw-600">Route map</div>
             <div className="text-xs text-secondary">{stops.length} stops · nearest-neighbour</div>
           </div>
-          <RFUI.FakeMap stops={stops} height={360} withLabels />
+          <RFUI.RouteMap stops={stops} height={360} withLabels />
         </div>
 
         <div className="card">

@@ -34,10 +34,10 @@ function LandingPage({ navigate, isAuthed }) {
         </div>
 
         <div className="stats-strip" style={{ marginTop: 56 }}>
-          <div className="stat"><div className="stat-num">23%</div><div className="stat-label">Avg time saved</div></div>
-          <div className="stat"><div className="stat-num">4.1km</div><div className="stat-label">Walked per shift</div></div>
-          <div className="stat"><div className="stat-num">112</div><div className="stat-label">Stops optimised</div></div>
-          <div className="stat"><div className="stat-num">98.4%</div><div className="stat-label">On-time delivery</div></div>
+          <div className="stat"><div className="stat-num">12 min</div><div className="stat-label">Walking diameter cap per cluster</div></div>
+          <div className="stat"><div className="stat-num">2-opt + or-opt</div><div className="stat-label">TSP solver chain</div></div>
+          <div className="stat"><div className="stat-num">Live</div><div className="stat-label">Traffic-aware re-decide on every drop</div></div>
+          <div className="stat"><div className="stat-num">Realtime</div><div className="stat-label">Supabase sync, offline queue, GPS</div></div>
         </div>
       </section>
 

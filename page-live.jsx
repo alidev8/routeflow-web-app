@@ -525,7 +525,7 @@ function LivePage({ navigate, params }) {
       </div>
 
       <div className="live-map">
-        <RFUI.FakeMap
+        <RFUI.RouteMap
           stops={stops}
           current={current}
           me={me}

@@ -1,4 +1,4 @@
-// Settings / Analytics — lightweight placeholder pages so nav feels real.
+// Settings / Analytics pages.
 function SettingsPage({ user, navigate, onSignOut }) {
   const toast = RFUI.useToast();
   const [name, setName] = React.useState(user?.fullName || '');
@@ -52,15 +52,6 @@ function SettingsPage({ user, navigate, onSignOut }) {
       </div>
 
       <div className="card mt-6">
-        <div className="fw-600 mb-2" style={{ color: 'var(--color-danger)' }}>Danger zone</div>
-        <div className="text-sm text-secondary mb-4">Local data is stored on this device only.</div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-secondary" onClick={clearData}><I.Trash size={14} /> Clear all data</button>
-          <button className="btn btn-secondary" onClick={onSignOut}><I.LogOut size={14} /> Sign out</button>
-        </div>
-      </div>
-
-      <div className="card mt-6">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
           <div>
             <div className="fw-600">Cloud sync</div>
@@ -68,13 +59,14 @@ function SettingsPage({ user, navigate, onSignOut }) {
           </div>
           <span className={`sync-bar ${RF.cloud.configured ? '' : 'local'}`}><span className="dot"></span>{RF.cloud.label}</span>
         </div>
-        <div className="divider"></div>
-        <div className="fw-600 mb-2 text-sm">1 — Add Supabase keys to <span className="mono">.env.local</span></div>
-        <div className="codeblock"><span className="hl-com"># .env.local</span>{'\n'}<span className="hl-key">VITE_SUPABASE_URL</span>=<span className="hl-val">https://xxxxx.supabase.co</span>{'\n'}<span className="hl-key">VITE_SUPABASE_ANON_KEY</span>=<span className="hl-val">eyJhbGc...</span>{'\n'}<span className="hl-key">VITE_GOOGLE_MAPS_KEY</span>=<span className="hl-val">AIzaSy...</span></div>
-        <div className="fw-600 mb-2 text-sm" style={{ marginTop: 16 }}>2 — Deploy to Vercel</div>
-        <div className="codeblock">npx vercel{'\n'}<span className="hl-com"># or, with the CLI:</span>{'\n'}vercel --prod</div>
-        <div className="text-xs text-muted mt-4">
-          The frontend already speaks to a thin <span className="mono">RF</span> data layer — swap localStorage for the Supabase client and every page picks it up unchanged.
+      </div>
+
+      <div className="card mt-6">
+        <div className="fw-600 mb-2" style={{ color: 'var(--color-danger)' }}>Danger zone</div>
+        <div className="text-sm text-secondary mb-4">Permanently deletes all your trips and activity from the cloud. This cannot be undone.</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-secondary" onClick={clearData}><I.Trash size={14} /> Clear all data</button>
+          <button className="btn btn-secondary" onClick={onSignOut}><I.LogOut size={14} /> Sign out</button>
         </div>
       </div>
 
@@ -106,6 +98,14 @@ function AnalyticsPage({ navigate }) {
   const completed = trips.filter((t) => t.status === 'completed').length;
   const totalSaved = trips.reduce((a, t) => a + (t.timeSaved || 0), 0);
   const totalDist = trips.reduce((a, t) => a + (t.totalDistance || 0), 0);
+  // Average minutes saved per completed trip - real number from actual trips
+  // rather than a marketing-looking hardcoded "+23% efficiency".
+  const avgSaved = completed > 0 ? totalSaved / completed : 0;
+  // Stops delivered vs stops total across all trips - that's our "on time"
+  // proxy until we capture per-stop scheduled vs actual times.
+  const allStops = trips.flatMap((t) => t.optimised || []);
+  const deliveredStops = allStops.filter((s) => s.status === 'delivered').length;
+  const completionRate = allStops.length > 0 ? (deliveredStops / allStops.length) * 100 : 0;
 
   // Generate spark bars from trips
   const recent = trips.slice(0, 12).reverse();
@@ -122,9 +122,9 @@ function AnalyticsPage({ navigate }) {
 
       <div className="kpi-grid">
         <div className="kpi"><div className="kpi-label"><I.Route size={14} />Trips</div><div className="kpi-value">{trips.length}</div><div className="kpi-delta">{completed} completed</div></div>
-        <div className="kpi"><div className="kpi-label"><I.Clock size={14} />Time saved</div><div className="kpi-value">{Math.round(totalSaved)}m</div><div className="kpi-delta up">+23% efficiency</div></div>
+        <div className="kpi"><div className="kpi-label"><I.Clock size={14} />Time saved</div><div className="kpi-value">{Math.round(totalSaved)}m</div><div className="kpi-delta">{completed ? `~${Math.round(avgSaved)}m per trip` : 'No completed trips yet'}</div></div>
         <div className="kpi"><div className="kpi-label"><I.TrendUp size={14} />Distance</div><div className="kpi-value">{totalDist.toFixed(1)}km</div><div className="kpi-delta">walked + driven</div></div>
-        <div className="kpi"><div className="kpi-label"><I.CheckCircle size={14} />On-time</div><div className="kpi-value">98.4%</div><div className="kpi-delta up">vs. baseline</div></div>
+        <div className="kpi"><div className="kpi-label"><I.CheckCircle size={14} />Stops delivered</div><div className="kpi-value">{deliveredStops}</div><div className="kpi-delta">{allStops.length ? `${completionRate.toFixed(0)}% of ${allStops.length} planned` : 'No stops yet'}</div></div>
       </div>
 
       <div className="card mt-6">

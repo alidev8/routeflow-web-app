@@ -122,7 +122,7 @@ function OptimisePage({ navigate, params }) {
             <div className="text-sm text-secondary mono">{trip.totalDistance}km · {Math.round(trip.timeSaved)}m saved</div>
           )}
         </div>
-        <FakeMap stops={optimised.length ? optimised : []} height={280} withLabels />
+        <RouteMap stops={optimised.length ? optimised : []} height={280} withLabels />
       </div>
 
       {done && (
@@ -142,5 +142,5 @@ function OptimisePage({ navigate, params }) {
   );
 }
 
-const FakeMap = (props) => RFUI.FakeMap(props);
+const RouteMap = (props) => RFUI.RouteMap(props);
 window.OptimisePage = OptimisePage;
