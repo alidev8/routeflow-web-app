@@ -34,6 +34,14 @@ function DashboardPage({ navigate }) {
   const totalStops = trips.reduce((a, t) => a + (t.stops || 0), 0);
   const totalDist = trips.reduce((a, t) => a + (t.totalDistance || 0), 0);
   const totalSaved = trips.reduce((a, t) => a + (t.timeSaved || 0), 0);
+  // The single most useful "what do I do next" surface for a driver: any
+  // trip in-progress or just-optimised gets a big resume button at the top.
+  const resumable = React.useMemo(
+    () => trips.find((t) => t.status === 'in-progress')
+      || trips.find((t) => t.status === 'optimised'),
+    [trips]
+  );
+  const resumeRoute = resumable && resumable.status === 'optimised' ? 'optimise' : 'live';
 
   return (
     <div className="page fade-in">
@@ -53,6 +61,35 @@ function DashboardPage({ navigate }) {
           <button className="btn btn-primary" onClick={() => navigate('create-trip')}><I.Plus size={14} /> New trip</button>
         </div>
       </div>
+
+      {resumable && (
+        <div style={{
+          marginTop: 8, marginBottom: 18,
+          background: 'linear-gradient(135deg, rgba(48,209,88,0.18), rgba(10,132,255,0.10))',
+          border: '1px solid rgba(48,209,88,0.45)',
+          borderRadius: 'var(--r-lg)',
+          padding: '14px 18px',
+          display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
+        }}>
+          <div style={{ width: 40, height: 40, borderRadius: 12, background: 'rgba(48,209,88,0.28)', display: 'grid', placeItems: 'center', flex: '0 0 auto' }}>
+            <I.Play size={18} stroke="#30D158" />
+          </div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>
+              {resumable.status === 'in-progress' ? 'Trip in progress' : 'Route ready to start'}
+            </div>
+            <div className="text-xs text-secondary" style={{ marginTop: 2 }}>
+              <b>{resumable.name}</b> · {resumable.stops} stops
+              {resumable.totalDistance ? ` · ${Number(resumable.totalDistance).toFixed(1)} km` : ''}
+              {resumable.timeSaved ? ` · ${Math.round(resumable.timeSaved)} min saved` : ''}
+            </div>
+          </div>
+          <button className="btn btn-primary"
+            onClick={() => navigate(resumeRoute, { tripId: resumable.id })}>
+            {resumable.status === 'in-progress' ? 'Resume delivery' : 'Start delivery'} <I.ArrowRight size={14} />
+          </button>
+        </div>
+      )}
 
       <div className="kpi-grid">
         {[

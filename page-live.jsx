@@ -11,7 +11,10 @@ function LivePage({ navigate, params }) {
   const [decision, setDecision] = React.useState(null);     // last RF.decideMode result
   const [dismissed, setDismissed] = React.useState(false);  // user dismissed the suggestion banner
   const [online, setOnline] = React.useState(typeof navigator === 'undefined' ? true : navigator.onLine !== false);
-  const [pending, setPending] = React.useState(() => (RF.getPendingDeliveries ? RF.getPendingDeliveries().length : 0));
+  const [pending, setPending] = React.useState(() => {
+    try { return RF.getPendingDeliveries ? RF.getPendingDeliveries().length : 0; } catch { return 0; }
+  });
+  const [loadState, setLoadState] = React.useState('loading'); // loading | ready | not-found | no-trip-id
 
   React.useEffect(() => {
     const onOn = () => setOnline(true);
@@ -30,21 +33,48 @@ function LivePage({ navigate, params }) {
   }, []);
 
   React.useEffect(() => {
-    const t = RF.getTrip(params?.tripId);
-    if (!t) { toast('Trip not found', 'error'); navigate('dashboard'); return; }
-    setTrip(t);
-    setStops(t.optimised || []);
-    // Mark trip in-progress as soon as the live page mounts (idempotent).
-    if (t.status !== 'in-progress' && t.status !== 'completed') {
-      RF.saveTrip({ ...t, status: 'in-progress' }).catch(() => {});
+    const tripId = params?.tripId;
+    if (!tripId) { setLoadState('no-trip-id'); return; }
+    let cancelled = false;
+    let off = () => {};
+    let interval = null;
+    let retryHandle = null;
+
+    function tryLoad(attempt) {
+      if (cancelled) return;
+      const t = RF.getTrip(tripId);
+      if (t) {
+        setTrip(t);
+        setStops(t.optimised || []);
+        setLoadState('ready');
+        if (t.status !== 'in-progress' && t.status !== 'completed') {
+          RF.saveTrip({ ...t, status: 'in-progress' }).catch(() => {});
+        }
+        off = RF.subscribe(() => {
+          const fresh = RF.getTrip(tripId);
+          if (fresh) { setTrip(fresh); setStops(fresh.optimised || []); }
+        });
+        interval = setInterval(() => setNow(new Date()), 1000);
+        return;
+      }
+      // The in-memory trips list may still be hydrating from Supabase. Retry
+      // up to ~3s before declaring the trip really missing - much friendlier
+      // than the old behaviour that toasted "Trip not found" the moment the
+      // page mounted under a slow network.
+      if (attempt < 6) {
+        retryHandle = setTimeout(() => tryLoad(attempt + 1), 500);
+      } else {
+        setLoadState('not-found');
+      }
     }
-    // Realtime: keep stops + trip in sync if another device updates them.
-    const off = RF.subscribe(() => {
-      const fresh = RF.getTrip(params?.tripId);
-      if (fresh) { setTrip(fresh); setStops(fresh.optimised || []); }
-    });
-    const i = setInterval(() => setNow(new Date()), 1000);
-    return () => { clearInterval(i); off(); };
+    tryLoad(0);
+
+    return () => {
+      cancelled = true;
+      if (retryHandle) clearTimeout(retryHandle);
+      if (interval) clearInterval(interval);
+      off();
+    };
   }, [params?.tripId]);
 
   // Try to use real geolocation; otherwise simulate movement toward the current stop.
@@ -131,7 +161,36 @@ function LivePage({ navigate, params }) {
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
-  if (!trip) return <div className="page"><div className="skel" style={{ height: 200 }}></div></div>;
+  if (loadState !== 'ready' || !trip) {
+    let title, body, primary;
+    if (loadState === 'no-trip-id') {
+      title = 'No trip selected';
+      body = 'Open a trip from the dashboard to start delivering.';
+      primary = { label: 'Go to dashboard', onClick: () => navigate('dashboard') };
+    } else if (loadState === 'not-found') {
+      title = 'Trip not found';
+      body = 'It may have been deleted, or you opened a stale link. Return to your dashboard to pick up an active trip.';
+      primary = { label: 'Go to dashboard', onClick: () => navigate('dashboard') };
+    } else {
+      title = 'Loading your trip...';
+      body = 'Pulling stops, position, and live status. This usually takes under a second.';
+      primary = null;
+    }
+    return (
+      <div style={{ minHeight: '100vh', background: 'var(--color-bg)', display: 'grid', placeItems: 'center', padding: 24 }}>
+        <div style={{ maxWidth: 440, width: '100%', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 'var(--r-lg)', padding: 24, textAlign: 'center' }}>
+          <div style={{ width: 44, height: 44, margin: '0 auto 14px', borderRadius: 12, background: loadState === 'not-found' ? 'rgba(255, 69, 58, 0.18)' : 'rgba(10, 132, 255, 0.18)', display: 'grid', placeItems: 'center', color: loadState === 'not-found' ? '#ff453a' : 'var(--color-accent)' }}>
+            {loadState === 'loading' ? <span className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }}></span> : <I.Info size={20} />}
+          </div>
+          <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>{title}</h2>
+          <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 8, lineHeight: 1.5 }}>{body}</div>
+          {primary && (
+            <button className="btn btn-primary" style={{ marginTop: 18 }} onClick={primary.onClick}>{primary.label}</button>
+          )}
+        </div>
+      </div>
+    );
+  }
   const cur = stops[current];
   const remaining = stops.length - current - (cur?.status === 'delivered' ? 1 : 0);
   const sheetH = expanded ? '60vh' : '38vh';
@@ -284,6 +343,19 @@ function LivePage({ navigate, params }) {
       <div className="bottom-sheet" style={{ maxHeight: sheetH, overflowY: 'auto', transition: 'max-height 0.3s ease' }}>
         <div className="bottom-sheet-handle" onClick={() => setExpanded((e) => !e)} style={{ cursor: 'pointer' }}></div>
 
+        {!cur && (
+          <div style={{ padding: '24px 12px', textAlign: 'center' }}>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>No active stop</div>
+            <div className="text-sm text-secondary" style={{ marginTop: 6 }}>
+              {stops.length === 0
+                ? 'This trip has no optimised stops yet. Open it from the dashboard to optimise first.'
+                : 'All stops have been delivered.'}
+            </div>
+            <button className="btn btn-primary" style={{ marginTop: 14 }} onClick={() => navigate('dashboard')}>
+              Back to dashboard
+            </button>
+          </div>
+        )}
         {cur && (
           <div>
             {decisionFlip && (

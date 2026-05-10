@@ -1,12 +1,62 @@
+// Catches any render-time crash inside the wrapped subtree and shows the
+// error message instead of letting the app go blank. Without this, a single
+// undefined-property access in a deeply-nested page would unmount everything.
+class RouteErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error('[RouteErrorBoundary]', error, info); }
+  render() {
+    if (this.state.error) {
+      const msg = this.state.error?.message || String(this.state.error);
+      return (
+        <div style={{ minHeight: '100vh', background: 'var(--color-bg)', display: 'grid', placeItems: 'center', padding: 24 }}>
+          <div style={{ maxWidth: 480, width: '100%', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 'var(--r-lg)', padding: 24, textAlign: 'center' }}>
+            <div style={{ width: 44, height: 44, margin: '0 auto 14px', borderRadius: 12, background: 'rgba(255, 69, 58, 0.18)', display: 'grid', placeItems: 'center', color: '#ff453a', fontSize: 22, fontWeight: 800 }}>!</div>
+            <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Something went wrong on this page</h2>
+            <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', marginTop: 8, wordBreak: 'break-word' }}>{msg}</div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 18 }}>
+              <button className="btn btn-secondary" onClick={() => { this.setState({ error: null }); window.location.hash = 'dashboard'; }}>Back to dashboard</button>
+              <button className="btn btn-primary" onClick={() => window.location.reload()}>Reload</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // Top-level app: routing, auth gate, layout shell.
+//
+// Routing model: hash-based. The hash carries both the route name and any
+// params as a query string, e.g. `#live?tripId=abc123`. We always serialise
+// params to the URL so a hard refresh on the live page (or a deep-linked
+// "continue trip" button) keeps working.
+function parseHash() {
+  const h = (window.location.hash || '').replace(/^#/, '');
+  const [route, query = ''] = h.split('?');
+  const params = {};
+  if (query) {
+    for (const part of query.split('&')) {
+      if (!part) continue;
+      const [k, v = ''] = part.split('=');
+      if (k) params[decodeURIComponent(k)] = decodeURIComponent(v);
+    }
+  }
+  return { route: route || 'landing', params };
+}
+function buildHash(route, params) {
+  const entries = Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== null && v !== '');
+  if (!entries.length) return route;
+  return route + '?' + entries.map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v))).join('&');
+}
+
 function App() {
+  const initial = parseHash();
   const [ready, setReady] = React.useState(() => RF.isReady());
   const [user, setUser] = React.useState(() => RF.getCurrentUser());
-  const [route, setRoute] = React.useState(() => {
-    const h = window.location.hash.replace('#', '') || 'landing';
-    return h.split('?')[0];
-  });
-  const [params, setParams] = React.useState({});
+  const [route, setRoute] = React.useState(initial.route || 'landing');
+  const [params, setParams] = React.useState(initial.params || {});
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
 
   // Routes that require any signed-in user, and routes that additionally
@@ -20,8 +70,19 @@ function App() {
     setParams(p);
     setSidebarOpen(false);
     window.scrollTo(0, 0);
-    window.location.hash = r;
+    window.location.hash = buildHash(r, p);
   }
+
+  // Keep state in sync with browser back/forward.
+  React.useEffect(() => {
+    const onHash = () => {
+      const next = parseHash();
+      setRoute(next.route);
+      setParams(next.params);
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   // Reflect Supabase auth state changes back into React state.
   React.useEffect(() => {
@@ -34,8 +95,10 @@ function App() {
       // If the URL has no hash and the user is signed in, route based on role:
       // admins land on /admin, drivers land on /dashboard. Otherwise honour
       // the hash they came in with.
-      const h = window.location.hash.replace('#', '').split('?')[0];
-      if (!h) setRoute(u ? (u.isAdmin ? 'admin' : 'dashboard') : 'landing');
+      const cur = parseHash();
+      if (!cur.route || cur.route === 'landing') {
+        if (u) setRoute(u.isAdmin ? 'admin' : 'dashboard');
+      }
     });
     return () => {
       window.removeEventListener('rf:user-changed', onUserChanged);
@@ -99,7 +162,13 @@ function App() {
 
   // Live page is full-screen
   if (route === 'live') {
-    return <RFUI.ToastProvider><LivePage navigate={navigate} params={params} /></RFUI.ToastProvider>;
+    return (
+      <RFUI.ToastProvider>
+        <RouteErrorBoundary>
+          <LivePage navigate={navigate} params={params} />
+        </RouteErrorBoundary>
+      </RFUI.ToastProvider>
+    );
   }
 
   // App shell
@@ -116,15 +185,17 @@ function App() {
         />
         <main className="content">
           <RFUI.MobileHeader onMenu={() => setSidebarOpen(true)} title={titleFor(route)} />
-          {route === 'dashboard' && <DashboardPage navigate={navigate} />}
-          {route === 'create-trip' && <CreateTripPage navigate={navigate} params={params} />}
-          {route === 'optimise' && <OptimisePage navigate={navigate} params={params} />}
-          {route === 'summary' && <SummaryPage navigate={navigate} params={params} />}
-          {route === 'analytics' && <AnalyticsPage navigate={navigate} />}
-          {route === 'settings' && <SettingsPage user={user} navigate={navigate} onSignOut={onSignOut} />}
-          {route === 'admin' && <AdminPage navigate={navigate} tab="overview" />}
-          {route === 'admin-users' && <AdminPage navigate={navigate} tab="users" />}
-          {route === 'admin-trips' && <AdminPage navigate={navigate} tab="trips" />}
+          <RouteErrorBoundary>
+            {route === 'dashboard' && <DashboardPage navigate={navigate} />}
+            {route === 'create-trip' && <CreateTripPage navigate={navigate} params={params} />}
+            {route === 'optimise' && <OptimisePage navigate={navigate} params={params} />}
+            {route === 'summary' && <SummaryPage navigate={navigate} params={params} />}
+            {route === 'analytics' && <AnalyticsPage navigate={navigate} />}
+            {route === 'settings' && <SettingsPage user={user} navigate={navigate} onSignOut={onSignOut} />}
+            {route === 'admin' && <AdminPage navigate={navigate} tab="overview" />}
+            {route === 'admin-users' && <AdminPage navigate={navigate} tab="users" />}
+            {route === 'admin-trips' && <AdminPage navigate={navigate} tab="trips" />}
+          </RouteErrorBoundary>
         </main>
       </div>
     </RFUI.ToastProvider>

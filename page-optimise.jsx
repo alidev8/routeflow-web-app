@@ -128,7 +128,12 @@ function OptimisePage({ navigate, params }) {
       {done && (
         <div style={{ display: 'flex', gap: 8, marginTop: 24, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
           <button className="btn btn-secondary" onClick={() => navigate('dashboard')}>Back to dashboard</button>
-          <button className="btn btn-primary btn-lg" onClick={() => navigate('live', { tripId: trip.id })}>
+          <button className="btn btn-primary btn-lg"
+            onClick={() => {
+              const id = trip?.id || params?.tripId;
+              if (!id) { toast('Trip id missing - please reopen from dashboard', 'error'); return; }
+              navigate('live', { tripId: id });
+            }}>
             <I.Play size={14} /> Start delivery
           </button>
         </div>
