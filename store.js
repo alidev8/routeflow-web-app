@@ -406,6 +406,11 @@
   async function saveTrip(trip) {
     const userId = await withTimeout(requireUserId(), 8000, 'Auth check');
     if (!trip.id) trip.id = uid();
+    // If the trip isn't in our in-memory cache, treat it as fresh and skip
+    // the wasted "do stops already exist?" SELECT - we know they don't.
+    // This shaves a whole round-trip (and its potential retry) off the
+    // critical path of "user clicks Start optimising".
+    const isFreshTrip = !trips.find((t) => t.id === trip.id);
 
     const tripRow = {
       id: trip.id,
@@ -427,65 +432,74 @@
     );
     if (upRes.error) throw new Error(upRes.error.message);
 
+    function buildOptimisedRows() {
+      return trip.optimised.map((s) => ({
+        trip_id: trip.id,
+        user_id: userId,
+        sequence: s.sequence,
+        postcode: s.postcode,
+        place: s.place || null,
+        cluster_id: s.clusterId || null,
+        mode: s.mode || null,
+        latitude: s.latitude ?? null,
+        longitude: s.longitude ?? null,
+        distance_from_previous_km: Number(s.distanceFromPrevious || 0),
+        walking_time_min: Number(s.walkingTime || 0),
+        driving_time_min: Number(s.drivingTime || 0),
+        selected_time_min: Number(s.selectedTime || 0),
+        arrival_time: s.arrivalTime ? `${s.arrivalTime}:00` : null,
+        reasoning: s.reasoning || null,
+        status: s.status || 'pending',
+      }));
+    }
+
     if (Array.isArray(trip.optimised) && trip.optimised.length) {
-      const { data: existing } = await withRetry(
-        () => sb.from('stops').select('id, status, delivered_at, latitude').eq('trip_id', trip.id),
-        'Checking existing stops',
-        15000
-      );
-      const hasMutation = (existing || []).some((r) => r.status === 'delivered' || r.delivered_at);
-      const alreadyOptimised =
-        (existing || []).length === trip.optimised.length &&
-        (existing || []).every((r) => r.latitude != null);
-      if (!hasMutation && !alreadyOptimised) {
-        await withRetry(() => sb.from('stops').delete().eq('trip_id', trip.id), 'Clearing old stops', 15000);
-        const rows = trip.optimised.map((s) => ({
-          trip_id: trip.id,
-          user_id: userId,
-          sequence: s.sequence,
-          postcode: s.postcode,
-          place: s.place || null,
-          cluster_id: s.clusterId || null,
-          mode: s.mode || null,
-          latitude: s.latitude ?? null,
-          longitude: s.longitude ?? null,
-          distance_from_previous_km: Number(s.distanceFromPrevious || 0),
-          walking_time_min: Number(s.walkingTime || 0),
-          driving_time_min: Number(s.drivingTime || 0),
-          selected_time_min: Number(s.selectedTime || 0),
-          arrival_time: s.arrivalTime ? `${s.arrivalTime}:00` : null,
-          reasoning: s.reasoning || null,
-          status: s.status || 'pending',
-        }));
-        if (rows.length) {
-          const insRes = await withRetry(
-            () => sb.from('stops').insert(rows),
-            `Saving ${rows.length} stops`,
-            30000
-          );
-          if (insRes.error) throw new Error(insRes.error.message);
+      if (isFreshTrip) {
+        // No existing stops to merge with - go straight to insert.
+        const rows = buildOptimisedRows();
+        const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
+        if (insRes.error) throw new Error(insRes.error.message);
+      } else {
+        const { data: existing } = await withRetry(
+          () => sb.from('stops').select('id, status, delivered_at, latitude').eq('trip_id', trip.id),
+          'Checking existing stops',
+          15000
+        );
+        const hasMutation = (existing || []).some((r) => r.status === 'delivered' || r.delivered_at);
+        const alreadyOptimised =
+          (existing || []).length === trip.optimised.length &&
+          (existing || []).every((r) => r.latitude != null);
+        if (!hasMutation && !alreadyOptimised) {
+          await withRetry(() => sb.from('stops').delete().eq('trip_id', trip.id), 'Clearing old stops', 15000);
+          const rows = buildOptimisedRows();
+          if (rows.length) {
+            const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
+            if (insRes.error) throw new Error(insRes.error.message);
+          }
         }
       }
     } else if (Array.isArray(trip.stopList) && trip.stopList.length) {
-      const { count } = await withRetry(
-        () => sb.from('stops').select('id', { count: 'exact', head: true }).eq('trip_id', trip.id),
-        'Checking existing stops',
-        15000
-      );
-      if (!count) {
-        const rows = trip.stopList.map((pc, i) => ({
-          trip_id: trip.id,
-          user_id: userId,
-          sequence: i + 1,
-          postcode: pc,
-          status: 'pending',
-        }));
-        const { error: insErr } = await withRetry(
-          () => sb.from('stops').insert(rows),
-          `Saving ${rows.length} stops`,
-          30000
+      const rows = trip.stopList.map((pc, i) => ({
+        trip_id: trip.id,
+        user_id: userId,
+        sequence: i + 1,
+        postcode: pc,
+        status: 'pending',
+      }));
+      if (isFreshTrip) {
+        // Fresh trip: just insert. No existing stops by definition.
+        const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
+        if (insRes.error) throw new Error(insRes.error.message);
+      } else {
+        const { count } = await withRetry(
+          () => sb.from('stops').select('id', { count: 'exact', head: true }).eq('trip_id', trip.id),
+          'Checking existing stops',
+          15000
         );
-        if (insErr) throw new Error(insErr.message);
+        if (!count) {
+          const insRes = await withRetry(() => sb.from('stops').insert(rows), `Saving ${rows.length} stops`, 30000);
+          if (insRes.error) throw new Error(insRes.error.message);
+        }
       }
     }
 

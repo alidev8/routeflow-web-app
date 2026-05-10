@@ -1,4 +1,6 @@
-// Auth page (sign in / sign up).
+// Auth page (sign in / sign up). All validation is intentionally lenient -
+// Supabase Auth is the source of truth for what a "valid" email/password is,
+// and a strict client-side regex was rejecting valid edge-case emails.
 function AuthPage({ navigate, onAuthed }) {
   const toast = RFUI.useToast();
   const [tab, setTab] = React.useState('signin');
@@ -10,44 +12,37 @@ function AuthPage({ navigate, onAuthed }) {
 
   function validate() {
     const e = {};
-    if (!email) e.email = 'Email is required';
-    else if (!/^[^@]+@[^@]+\.[^@]+$/.test(email)) e.email = 'Enter a valid email';
+    const trimmed = email.trim();
+    if (!trimmed) e.email = 'Email is required';
+    // Loose check: just require an "@" and a "." somewhere after it. The
+    // browser's type="email" handles the format details, and Supabase will
+    // reject anything that's not actually a real address.
+    else if (!/.+@.+\..+/.test(trimmed)) e.email = 'Enter a valid email';
     if (!password) e.password = 'Password is required';
-    else if (password.length < 6) e.password = 'Min 6 characters';
-    if (tab === 'signup' && !fullName) e.fullName = 'Name is required';
+    if (tab === 'signup' && !fullName.trim()) e.fullName = 'Name is required';
     setErrors(e);
     return Object.keys(e).length === 0;
   }
 
   async function submit(ev) {
     ev.preventDefault();
+    if (loading) return; // guard against double-submit -> double signup -> 429
     if (!validate()) return;
     setLoading(true);
     try {
       const user = tab === 'signin'
-        ? await RF.signIn({ email, password })
-        : await RF.signUp({ email, password, fullName });
+        ? await RF.signIn({ email: email.trim(), password })
+        : await RF.signUp({ email: email.trim(), password, fullName: fullName.trim() });
       toast(tab === 'signin' ? 'Welcome back' : 'Account created', 'success');
       // onAuthed in app.jsx is role-aware (admins -> /admin, drivers -> /dashboard).
       onAuthed(user);
-    } catch (e) { toast(e.message, 'error'); }
-    finally { setLoading(false); }
-  }
-
-  // Pre-fills the form with a shared demo account so reviewers can poke around
-  // without creating their own login. The demo accounts must already exist in
-  // Supabase (seed once via a normal signup); we don't auto-create them here
-  // - that path led to the "Alex Driver" placeholder being written into a
-  // real user's profile when they accidentally typed the demo email.
-  function quickDemo(role = 'driver') {
-    if (role === 'admin') {
-      setEmail('admin@routeflow.app');
-      setPassword('admin12345');
-    } else {
-      setEmail('demo@routeflow.app');
-      setPassword('demo123');
+    } catch (e) {
+      // Surface Supabase's own error messages (e.g. "User already registered",
+      // "Invalid login credentials") - they're more actionable than a generic
+      // copy we'd write here.
+      toast(e?.message || 'Authentication failed', 'error');
     }
-    setTab('signin');
+    finally { setLoading(false); }
   }
 
   return (
@@ -93,19 +88,7 @@ function AuthPage({ navigate, onAuthed }) {
           </button>
         </form>
 
-        <div className="divider"></div>
-        <div className="text-xs text-muted" style={{ textAlign: 'center', marginBottom: 8 }}>
-          Just exploring? Pre-fill a shared demo login (review & evaluation only)
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <button type="button" className="btn btn-secondary btn-block" onClick={() => quickDemo('driver')}>
-            <I.Sparkles size={14} /> Driver demo
-          </button>
-          <button type="button" className="btn btn-secondary btn-block" onClick={() => quickDemo('admin')}>
-            <I.Shield size={14} /> Admin demo
-          </button>
-        </div>
-        <div className="text-xs text-muted mt-4" style={{ textAlign: 'center' }}>
+        <div className="text-xs text-muted mt-6" style={{ textAlign: 'center' }}>
           Real Supabase backend · Postgres + Auth + Realtime · RLS-isolated per user.
         </div>
       </div>

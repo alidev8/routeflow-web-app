@@ -12,6 +12,7 @@ function CreateTripPage({ navigate, params }) {
   const [stops, setStops] = React.useState([]);
   const [weights, setWeights] = React.useState({}); // { 'CT1 1AB': 12, ... }
   const [saving, setSaving] = React.useState(false);
+  const [slowSave, setSlowSave] = React.useState(false);
   const fileRef = React.useRef(null);
 
   React.useEffect(() => { setStops(RF.parsePostcodes(bulk)); }, [bulk]);
@@ -62,6 +63,10 @@ function CreateTripPage({ navigate, params }) {
       status: 'optimising',
     };
     setSaving(true);
+    setSlowSave(false);
+    // Slow-network nudge: if save hasn't returned within 8s, surface a
+    // non-blocking hint so the user knows the app isn't dead.
+    const slowHint = setTimeout(() => setSlowSave(true), 8000);
     try {
       await RF.saveTrip(trip);
       // Hold per-stop weights so the optimiser flow can splice them onto the
@@ -74,6 +79,9 @@ function CreateTripPage({ navigate, params }) {
       const msg = (e && e.message) ? e.message : 'Could not save trip';
       toast(msg, 'error');
       setSaving(false);
+    } finally {
+      clearTimeout(slowHint);
+      setSlowSave(false);
     }
   }
 
@@ -284,10 +292,21 @@ function CreateTripPage({ navigate, params }) {
             Optimisation runs nearest-neighbour clustering, geocodes postcodes, and decides walk-vs-drive per segment.
             Trip is saved to your dashboard automatically.
           </div>
+          {slowSave && (
+            <div style={{
+              marginTop: 16, padding: '10px 14px',
+              background: 'rgba(255, 159, 10, 0.10)',
+              border: '1px solid rgba(255, 159, 10, 0.35)',
+              borderRadius: 'var(--r-md)',
+              fontSize: 13, color: '#FF9F0A',
+            }}>
+              Still saving... your connection is slow but we're not giving up. The optimiser will run as soon as the trip is persisted.
+            </div>
+          )}
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, gap: 8 }}>
-            <button className="btn btn-secondary" onClick={() => setStep(2)}><I.ArrowLeft size={14} /> Back</button>
+            <button className="btn btn-secondary" onClick={() => setStep(2)} disabled={saving}><I.ArrowLeft size={14} /> Back</button>
             <button className="btn btn-primary btn-lg" onClick={startOptimise} disabled={saving}>
-              {saving ? (<><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }}></span> Saving...</>) : (<><I.Zap size={16} /> Start optimising</>)}
+              {saving ? (<><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }}></span> {slowSave ? 'Still saving...' : 'Saving...'}</>) : (<><I.Zap size={16} /> Start optimising</>)}
             </button>
           </div>
         </div>
