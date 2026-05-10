@@ -719,15 +719,6 @@
     if (!Array.isArray(optStops) || !optStops.length) throw new Error('Optimiser returned no stops');
 
     onProgress && onProgress({ stage: 'saving', pct: 96 });
-    // The edge fn already wrote the optimised stops to the DB. From the
-    // user's perspective the trip IS saved - we just want to update the
-    // local view-model. Fire applyWeights + refreshAll in the background
-    // so a slow SDK round-trip can't pin the spinner at 96% forever.
-    // (Same pattern we used to escape the saveTrip 25s hang.)
-    Promise.resolve()
-      .then(() => applyWeightsToStops(tripId).catch((e) => console.warn('[RF] weight merge failed', e)))
-      .then(() => withTimeout(refreshAll(), 8000, 'background refresh').catch(() => {}));
-    onProgress && onProgress({ stage: 'done', pct: 100 });
 
     // Stash skipped postcodes (if any) on the result array via a property so the
     // optimise page can surface a warning banner without changing the call shape.
@@ -753,7 +744,55 @@
     }));
     mapped.skipped = Array.isArray(data.skipped) ? data.skipped : [];
     mapped.clusters = Array.isArray(data.clusters) ? data.clusters : [];
+
+    // Inject the optimised stops into the in-memory cache directly so the
+    // next page (live) sees them immediately - no need to wait for the
+    // background refreshAll. This is what was causing "No active stop" on
+    // the live page after optimise: the user navigated faster than the
+    // refreshAll round-trip.
+    const idx = trips.findIndex((t) => t.id === tripId);
+    if (idx >= 0) {
+      trips[idx] = {
+        ...trips[idx],
+        status: 'optimised',
+        optimised: mapped,
+        totalDistance: mapped.reduce((a, s) => a + (Number(s.distanceFromPrevious) || 0), 0),
+        totalTime: mapped.reduce((a, s) => a + (Number(s.selectedTime) || 0), 0),
+      };
+      emit('store-changed');
+    }
+
+    // Now do weight merge + refreshAll in the background so the canonical
+    // server state syncs eventually. The user's UI does NOT block on these.
+    Promise.resolve()
+      .then(() => applyWeightsToStops(tripId).catch((e) => console.warn('[RF] weight merge failed', e)))
+      .then(() => withTimeout(refreshAll(), 8000, 'background refresh').catch(() => {}));
+    onProgress && onProgress({ stage: 'done', pct: 100 });
+
     return mapped;
+  }
+
+  // ---------- Lightweight trip status flip ----------
+  // The live page just needs to flip status to 'in-progress'. Doing a full
+  // saveTrip there triggered an existing-stops SELECT through the SDK that
+  // was timing out. This bypass writes only the status column via direct
+  // REST and updates the in-memory cache.
+  async function setTripStatus(tripId, status) {
+    if (!tripId || !status) return;
+    try {
+      await directRest(`trips?id=eq.${tripId}`, {
+        method: 'PATCH',
+        body: { status },
+        timeoutMs: 8000,
+      });
+      const idx = trips.findIndex((t) => t.id === tripId);
+      if (idx >= 0) {
+        trips[idx] = { ...trips[idx], status };
+        emit('store-changed');
+      }
+    } catch (e) {
+      console.warn('[RF] setTripStatus failed', e?.message);
+    }
   }
 
   // ---------- Stops ----------
@@ -1173,7 +1212,7 @@
   // ---------- Public RF surface ----------
   window.RF = {
     signUp, signIn, signOut, getCurrentUser,
-    getTrips, getTrip, saveTrip, deleteTrip, clearAllTrips,
+    getTrips, getTrip, saveTrip, setTripStatus, deleteTrip, clearAllTrips,
     markStopDelivered, markStopDeliveredQueued, updateDriverPosition,
     getPendingDeliveries, flushPendingDeliveries,
     getActivity, pushActivity,

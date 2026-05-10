@@ -48,8 +48,11 @@ function LivePage({ navigate, params }) {
         setTrip(t);
         setStops(t.optimised || []);
         setLoadState('ready');
+        // Lightweight status flip - doesn't touch stops at all. The previous
+        // RF.saveTrip(...) call here re-traversed the whole trip+stops
+        // payload and got stuck on an existing-stops SELECT.
         if (t.status !== 'in-progress' && t.status !== 'completed') {
-          RF.saveTrip({ ...t, status: 'in-progress' }).catch(() => {});
+          RF.setTripStatus(t.id, 'in-progress').catch(() => {});
         }
         off = RF.subscribe(() => {
           const fresh = RF.getTrip(tripId);
@@ -143,9 +146,10 @@ function LivePage({ navigate, params }) {
   }
 
   async function complete() {
-    const updated = { ...trip, status: 'completed', completedAt: new Date().toISOString() };
-    await RF.saveTrip(updated);
-    RF.pushActivity({ type: 'submit', title: 'Trip completed', meta: trip.name, tripId: trip.id });
+    // Lightweight status flip via direct REST. The previous full-trip
+    // saveTrip here got stuck on the existing-stops SELECT path.
+    await RF.setTripStatus(trip.id, 'completed').catch(() => {});
+    RF.pushActivity({ type: 'submit', title: 'Trip completed', meta: trip.name, tripId: trip.id }).catch(() => {});
     toast('Trip complete', 'success');
     navigate('summary', { tripId: trip.id });
   }
