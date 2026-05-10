@@ -28,8 +28,8 @@ function AuthPage({ navigate, onAuthed }) {
         ? await RF.signIn({ email, password })
         : await RF.signUp({ email, password, fullName });
       toast(tab === 'signin' ? 'Welcome back' : 'Account created', 'success');
+      // onAuthed in app.jsx is role-aware (admins -> /admin, drivers -> /dashboard).
       onAuthed(user);
-      navigate('dashboard');
     } catch (e) { toast(e.message, 'error'); }
     finally { setLoading(false); }
   }
