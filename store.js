@@ -334,19 +334,18 @@
     });
     if (error) throw new Error(error.message);
     if (!data.session) throw new Error('Check your email to confirm your account, then sign in');
-    // Defensive profile upsert: the handle_new_user trigger should populate
-    // the profiles row, but if the trigger is missing or rate-limited the
-    // user would land in a broken half-signed-in state. Upsert ourselves
-    // (RLS policy "profiles self upd" allows it for the owner).
-    try {
-      await sb.from('profiles').upsert({
+    // The handle_new_user trigger creates the profile row, but if it's ever
+    // missing/disabled we defensively upsert. The "profiles self ins" RLS
+    // policy (auth.uid() = id) lets us do this safely. Don't block signup
+    // on a slow network - fire-and-forget with a short timeout.
+    timeBound(
+      sb.from('profiles').upsert({
         id: data.user.id,
         email: data.user.email,
         full_name: cleanName,
-      }, { onConflict: 'id' });
-    } catch (e) {
-      console.warn('[RF] profile upsert after signUp failed', e);
-    }
+      }, { onConflict: 'id' }),
+      4000, null
+    ).catch((e) => console.warn('[RF] profile upsert after signUp failed', e));
     await syncUserFromSession();
     await refreshAll();
     pushActivity({ type: 'auth', title: 'Account created', meta: email }).catch(() => {});
@@ -357,20 +356,9 @@
     if (!email || !password) throw new Error('Enter email and password');
     const { data, error } = await sb.auth.signInWithPassword({ email, password });
     if (error) throw new Error(error.message);
-    // Defensive profile insert: catches the "auth row exists but profile row
-    // doesn't" edge case that happens when the handle_new_user trigger was
-    // missing at signup time. ignoreDuplicates so we don't overwrite a name
-    // the user has already personalised in /settings.
-    try {
-      const fallbackName = data.user.user_metadata?.full_name || (email.split('@')[0] || '').trim() || 'Driver';
-      await sb.from('profiles').upsert({
-        id: data.user.id,
-        email: data.user.email,
-        full_name: fallbackName,
-      }, { onConflict: 'id', ignoreDuplicates: true });
-    } catch (e) {
-      console.warn('[RF] profile upsert after signIn failed', e);
-    }
+    // Profile row is created by the handle_new_user trigger at signup time
+    // (idempotent, SECURITY DEFINER). syncUserFromSession picks it up - no
+    // need to upsert from the client during signIn.
     await syncUserFromSession();
     await refreshAll();
     pushActivity({ type: 'auth', title: 'Signed in', meta: email }).catch(() => {});
@@ -402,6 +390,19 @@
     });
   }
 
+  // One-shot retry on a transient network/timeout failure. Slow connections
+  // (mobile, hotel wifi) routinely lose a single round-trip - we don't want
+  // to fail a user's whole save just because one packet got dropped.
+  async function withRetry(fn, label, ms) {
+    try { return await withTimeout(fn(), ms, label); }
+    catch (e) {
+      const transient = /timed out|network|fetch|abort|econnreset|503|504/i.test(e?.message || '');
+      if (!transient) throw e;
+      console.warn(`[RF] ${label} failed once (${e.message}) - retrying`);
+      return await withTimeout(fn(), ms, label);
+    }
+  }
+
   async function saveTrip(trip) {
     const userId = await withTimeout(requireUserId(), 8000, 'Auth check');
     if (!trip.id) trip.id = uid();
@@ -419,21 +420,25 @@
       time_saved_min: Number(trip.timeSaved || 0),
       completed_at: trip.completedAt || null,
     };
-    const { error: upErr } = await withTimeout(
-      sb.from('trips').upsert(tripRow, { onConflict: 'id' }),
-      15000,
-      'Saving trip'
+    const upRes = await withRetry(
+      () => sb.from('trips').upsert(tripRow, { onConflict: 'id' }),
+      'Saving trip',
+      25000
     );
-    if (upErr) throw new Error(upErr.message);
+    if (upRes.error) throw new Error(upRes.error.message);
 
     if (Array.isArray(trip.optimised) && trip.optimised.length) {
-      const { data: existing } = await sb.from('stops').select('id, status, delivered_at, latitude').eq('trip_id', trip.id);
+      const { data: existing } = await withRetry(
+        () => sb.from('stops').select('id, status, delivered_at, latitude').eq('trip_id', trip.id),
+        'Checking existing stops',
+        15000
+      );
       const hasMutation = (existing || []).some((r) => r.status === 'delivered' || r.delivered_at);
       const alreadyOptimised =
         (existing || []).length === trip.optimised.length &&
         (existing || []).every((r) => r.latitude != null);
       if (!hasMutation && !alreadyOptimised) {
-        await sb.from('stops').delete().eq('trip_id', trip.id);
+        await withRetry(() => sb.from('stops').delete().eq('trip_id', trip.id), 'Clearing old stops', 15000);
         const rows = trip.optimised.map((s) => ({
           trip_id: trip.id,
           user_id: userId,
@@ -453,15 +458,19 @@
           status: s.status || 'pending',
         }));
         if (rows.length) {
-          const { error: insErr } = await sb.from('stops').insert(rows);
-          if (insErr) throw new Error(insErr.message);
+          const insRes = await withRetry(
+            () => sb.from('stops').insert(rows),
+            `Saving ${rows.length} stops`,
+            30000
+          );
+          if (insRes.error) throw new Error(insRes.error.message);
         }
       }
     } else if (Array.isArray(trip.stopList) && trip.stopList.length) {
-      const { count } = await withTimeout(
-        sb.from('stops').select('id', { count: 'exact', head: true }).eq('trip_id', trip.id),
-        10000,
-        'Checking existing stops'
+      const { count } = await withRetry(
+        () => sb.from('stops').select('id', { count: 'exact', head: true }).eq('trip_id', trip.id),
+        'Checking existing stops',
+        15000
       );
       if (!count) {
         const rows = trip.stopList.map((pc, i) => ({
@@ -471,10 +480,10 @@
           postcode: pc,
           status: 'pending',
         }));
-        const { error: insErr } = await withTimeout(
-          sb.from('stops').insert(rows),
-          20000,
-          `Saving ${rows.length} stops`
+        const { error: insErr } = await withRetry(
+          () => sb.from('stops').insert(rows),
+          `Saving ${rows.length} stops`,
+          30000
         );
         if (insErr) throw new Error(insErr.message);
       }
