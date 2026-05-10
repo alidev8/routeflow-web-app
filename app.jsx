@@ -9,6 +9,20 @@ function App() {
   const [params, setParams] = React.useState({});
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
 
+  // Routes that require any signed-in user, and routes that additionally
+  // require role=admin. Admin-only access is enforced both at the route level
+  // (here) and at the data layer (admin RLS policies in Supabase).
+  const authedRoutes = ['dashboard', 'create-trip', 'optimise', 'live', 'summary', 'analytics', 'settings', 'admin', 'admin-users', 'admin-trips'];
+  const adminRoutes = ['admin', 'admin-users', 'admin-trips'];
+
+  function navigate(r, p = {}) {
+    setRoute(r);
+    setParams(p);
+    setSidebarOpen(false);
+    window.scrollTo(0, 0);
+    window.location.hash = r;
+  }
+
   // Reflect Supabase auth state changes back into React state.
   React.useEffect(() => {
     const onUserChanged = () => setUser(RF.getCurrentUser());
@@ -29,6 +43,17 @@ function App() {
     };
   }, []);
 
+  // If a signed-in driver landed on an admin URL (deep link, refresh on
+  // /admin, etc), bounce them back to /dashboard. Done in an effect so we
+  // never trigger state updates during render. CRITICAL: this hook must
+  // sit above any early `return` so the hook call order stays stable
+  // between renders (Rules of Hooks).
+  React.useEffect(() => {
+    if (ready && user && !user.isAdmin && adminRoutes.includes(route)) {
+      navigate('dashboard');
+    }
+  }, [ready, user, route]);
+
   // Boot splash: wait until Supabase has resolved the session before deciding
   // whether to show landing/auth or the protected app.
   if (!ready) {
@@ -45,14 +70,6 @@ function App() {
     );
   }
 
-  function navigate(r, p = {}) {
-    setRoute(r);
-    setParams(p);
-    setSidebarOpen(false);
-    window.scrollTo(0, 0);
-    window.location.hash = r;
-  }
-
   function onAuthed(u) {
     setUser(u);
     // Admins go straight to the operations console; drivers to their dashboard.
@@ -63,21 +80,6 @@ function App() {
     setUser(null);
     navigate('landing');
   }
-
-  // Routes that require any signed-in user, and routes that additionally
-  // require role=admin. Admin-only access is enforced both at the route level
-  // (here) and at the data layer (admin RLS policies in Supabase).
-  const authedRoutes = ['dashboard', 'create-trip', 'optimise', 'live', 'summary', 'analytics', 'settings', 'admin', 'admin-users', 'admin-trips'];
-  const adminRoutes = ['admin', 'admin-users', 'admin-trips'];
-
-  // If a signed-in driver landed on an admin URL (deep link, refresh on
-  // /admin, etc), bounce them back to /dashboard. Done in an effect so we
-  // never trigger state updates during render.
-  React.useEffect(() => {
-    if (user && !user.isAdmin && adminRoutes.includes(route)) {
-      navigate('dashboard');
-    }
-  }, [user, route]);
 
   if (authedRoutes.includes(route) && !user) {
     return <RFUI.ToastProvider><AuthPage navigate={navigate} onAuthed={onAuthed} /></RFUI.ToastProvider>;
