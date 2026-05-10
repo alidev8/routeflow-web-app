@@ -69,12 +69,21 @@ function App() {
   // (here) and at the data layer (admin RLS policies in Supabase).
   const authedRoutes = ['dashboard', 'create-trip', 'optimise', 'live', 'summary', 'analytics', 'settings', 'admin', 'admin-users', 'admin-trips'];
   const adminRoutes = ['admin', 'admin-users', 'admin-trips'];
+
+  // If a signed-in driver landed on an admin URL (deep link, refresh on
+  // /admin, etc), bounce them back to /dashboard. Done in an effect so we
+  // never trigger state updates during render.
+  React.useEffect(() => {
+    if (user && !user.isAdmin && adminRoutes.includes(route)) {
+      navigate('dashboard');
+    }
+  }, [user, route]);
+
   if (authedRoutes.includes(route) && !user) {
     return <RFUI.ToastProvider><AuthPage navigate={navigate} onAuthed={onAuthed} /></RFUI.ToastProvider>;
   }
   if (adminRoutes.includes(route) && user && !user.isAdmin) {
-    // A signed-in driver tried to hit an admin URL — bounce them home.
-    setTimeout(() => navigate('dashboard'), 0);
+    // Render a tiny placeholder while the effect above redirects.
     return null;
   }
 
