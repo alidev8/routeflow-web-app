@@ -714,11 +714,14 @@
     if (!Array.isArray(optStops) || !optStops.length) throw new Error('Optimiser returned no stops');
 
     onProgress && onProgress({ stage: 'saving', pct: 96 });
-    // Edge fn has just inserted the optimised stops; merge any per-stop
-    // weights captured at create time onto their notes column before we
-    // refresh the in-memory view-model.
-    try { await applyWeightsToStops(tripId); } catch (e) { console.warn('[RF] weight merge failed', e); }
-    await refreshAll();
+    // The edge fn already wrote the optimised stops to the DB. From the
+    // user's perspective the trip IS saved - we just want to update the
+    // local view-model. Fire applyWeights + refreshAll in the background
+    // so a slow SDK round-trip can't pin the spinner at 96% forever.
+    // (Same pattern we used to escape the saveTrip 25s hang.)
+    Promise.resolve()
+      .then(() => applyWeightsToStops(tripId).catch((e) => console.warn('[RF] weight merge failed', e)))
+      .then(() => withTimeout(refreshAll(), 8000, 'background refresh').catch(() => {}));
     onProgress && onProgress({ stage: 'done', pct: 100 });
 
     // Stash skipped postcodes (if any) on the result array via a property so the
