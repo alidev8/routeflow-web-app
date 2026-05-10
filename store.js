@@ -116,14 +116,23 @@
     return data.user.id;
   }
 
+  // Time-limited helper: never let a network stall outlast `ms`.
+  function timeBound(promise, ms, fallback) {
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve(fallback), ms);
+      Promise.resolve(promise).then((v) => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(fallback); });
+    });
+  }
+
   async function loadProfile(userId) {
     const { data } = await sb.from('profiles').select('*').eq('id', userId).single();
     return data || null;
   }
 
   async function syncUserFromSession() {
-    const { data } = await sb.auth.getSession();
-    const session = data?.session;
+    // getSession reads from local storage and is fast, but bound it anyway.
+    const sessionResp = await timeBound(sb.auth.getSession(), 4000, { data: null });
+    const session = sessionResp?.data?.session;
     if (!session) {
       currentUser = null;
       teardownChannels();
@@ -133,19 +142,43 @@
       emit('store-changed');
       return null;
     }
-    const profile = await loadProfile(session.user.id).catch(() => null);
-    currentUser = {
-      id: session.user.id,
-      email: session.user.email,
-      fullName: profile?.full_name || session.user.user_metadata?.full_name || (session.user.email || '').split('@')[0],
-      units: profile?.units || 'metric',
-      dataSaver: !!profile?.data_saver,
-      role: profile?.role || 'user',
-      isAdmin: profile?.role === 'admin',
-      createdAt: session.user.created_at,
-    };
+    // The profile fetch is the slowest hop on cold reload. Cap it at 5s and
+    // fall back to fields from the JWT user object so we still expose a
+    // signed-in user object. If the profile didn't land in time, retry in
+    // the background so role/full_name update once it does (admins won't be
+    // mis-classified as drivers for more than a few seconds).
+    const profile = await timeBound(loadProfile(session.user.id).catch(() => null), 5000, null);
+    function applyProfile(p) {
+      currentUser = {
+        id: session.user.id,
+        email: session.user.email,
+        fullName: p?.full_name || session.user.user_metadata?.full_name || (session.user.email || '').split('@')[0],
+        units: p?.units || 'metric',
+        dataSaver: !!p?.data_saver,
+        role: p?.role || 'user',
+        isAdmin: p?.role === 'admin',
+        createdAt: session.user.created_at,
+      };
+    }
+    applyProfile(profile);
     setupChannels(currentUser.id);
     emit('user-changed');
+    if (!profile) {
+      // Background retry so the role/admin flag is correct once the network
+      // recovers. Re-emit user-changed so the React tree picks it up.
+      (async () => {
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+          const p = await loadProfile(session.user.id).catch(() => null);
+          if (p) {
+            applyProfile(p);
+            emit('user-changed');
+            refreshAll().catch(() => {});
+            return;
+          }
+        }
+      })();
+    }
     return currentUser;
   }
 
