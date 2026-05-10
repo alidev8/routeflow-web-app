@@ -119,13 +119,26 @@
   }
 
   // ---------- session / user ----------
-  // Always source of truth: ask Supabase. Cache the user id but never trust it
-  // beyond a single mutation - re-resolves automatically if cleared.
+  // Cached user id is the fast path; if it's gone we decode the user id
+  // straight out of the JWT in localStorage instead of round-tripping to
+  // /auth/v1/user (which goes through the SDK's refresh logic and can hang).
+  function _userIdFromCachedToken() {
+    const token = _cachedAccessToken();
+    if (!token) return null;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      return payload?.sub || null;
+    } catch { return null; }
+  }
   async function requireUserId() {
     if (currentUser?.id) return currentUser.id;
-    const { data, error } = await sb.auth.getUser();
-    if (error || !data?.user) throw new Error('Sign in required');
-    return data.user.id;
+    const fromToken = _userIdFromCachedToken();
+    if (fromToken) return fromToken;
+    // Last resort - hits the network. Time-bound so it can't hang the UI.
+    const resp = await timeBound(sb.auth.getUser(), 5000, null);
+    const id = resp?.data?.user?.id;
+    if (!id) throw new Error('Sign in required');
+    return id;
   }
 
   // Time-limited helper: never let a network stall outlast `ms`.
@@ -654,8 +667,11 @@
   // ---------- Optimisation (Edge Function) ----------
   async function optimiseRoute(stopList, mode = 'hybrid', onProgress, tripId) {
     if (!tripId) throw new Error('tripId is required');
-    const { data: sess } = await sb.auth.getSession();
-    const token = sess?.session?.access_token;
+    // Use the cached access token directly. Going through sb.auth.getSession()
+    // can hang on the SDK's refresh path (same root cause as the saveTrip
+    // 25s timeout). On a stale token PostgREST/edge-fn returns 401 fast and
+    // we surface a clear sign-in-required error instead of a 60s spin.
+    const token = _cachedAccessToken();
     if (!token) throw new Error('Sign in expired - please sign in again');
 
     onProgress && onProgress({ stage: 'geocoding', pct: 8 });
