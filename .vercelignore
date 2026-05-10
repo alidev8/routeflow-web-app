@@ -1,0 +1,23 @@
+# Vercel-specific ignore (overrides .gitignore for upload).
+# We DO want config.local.js shipped (publishable client keys only).
+# We DO NOT want any admin tokens or local dev artefacts shipped.
+
+.git
+.claude
+.e2e
+.test
+.mcp.json
+.env
+.env.local
+.env.*.local
+node_modules
+dist
+build
+.next
+out
+*.log
+*.png
+.DS_Store
+Thumbs.db
+.vscode
+.idea

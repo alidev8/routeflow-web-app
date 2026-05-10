@@ -10,6 +10,7 @@ function CreateTripPage({ navigate, params }) {
   const [bulk, setBulk] = React.useState('');
   const [single, setSingle] = React.useState('');
   const [stops, setStops] = React.useState([]);
+  const [saving, setSaving] = React.useState(false);
   const fileRef = React.useRef(null);
 
   React.useEffect(() => { setStops(RF.parsePostcodes(bulk)); }, [bulk]);
@@ -37,7 +38,9 @@ function CreateTripPage({ navigate, params }) {
   }
 
   async function startOptimise() {
+    if (saving) return;
     if (stops.length < 2) { toast('Add at least 2 stops', 'error'); return; }
+    if (!RF.getCurrentUser()) { toast('Sign in expired - please sign in again', 'error'); navigate('auth'); return; }
     const trip = {
       id: RF.uid(),
       name,
@@ -49,9 +52,17 @@ function CreateTripPage({ navigate, params }) {
       timeSaved: 0,
       status: 'optimising',
     };
-    await RF.saveTrip(trip);
-    RF.pushActivity({ type: 'submit', title: 'Trip created', meta: `${stops.length} stops · ${name}` });
-    navigate('optimise', { tripId: trip.id });
+    setSaving(true);
+    try {
+      await RF.saveTrip(trip);
+      RF.pushActivity({ type: 'submit', title: 'Trip created', meta: `${stops.length} stops · ${name}` }).catch(() => {});
+      navigate('optimise', { tripId: trip.id });
+    } catch (e) {
+      console.error('[create-trip] saveTrip failed', e);
+      const msg = (e && e.message) ? e.message : 'Could not save trip';
+      toast(msg, 'error');
+      setSaving(false);
+    }
   }
 
   return (
@@ -212,8 +223,8 @@ function CreateTripPage({ navigate, params }) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, gap: 8 }}>
             <button className="btn btn-secondary" onClick={() => setStep(2)}><I.ArrowLeft size={14} /> Back</button>
-            <button className="btn btn-primary btn-lg" onClick={startOptimise}>
-              <I.Zap size={16} /> Start optimising
+            <button className="btn btn-primary btn-lg" onClick={startOptimise} disabled={saving}>
+              {saving ? (<><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }}></span> Saving...</>) : (<><I.Zap size={16} /> Start optimising</>)}
             </button>
           </div>
         </div>
