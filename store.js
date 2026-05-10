@@ -299,8 +299,17 @@
   function getTrips() { return trips; }
   function getTrip(id) { return trips.find((t) => t.id === id) || null; }
 
+  // Wraps a Supabase promise so a stalled network connection surfaces as a
+  // clean error instead of leaving the UI spinning forever.
+  function withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s - check your connection`)), ms);
+      promise.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+    });
+  }
+
   async function saveTrip(trip) {
-    const userId = await requireUserId();
+    const userId = await withTimeout(requireUserId(), 8000, 'Auth check');
     if (!trip.id) trip.id = uid();
 
     const tripRow = {
@@ -316,7 +325,11 @@
       time_saved_min: Number(trip.timeSaved || 0),
       completed_at: trip.completedAt || null,
     };
-    const { error: upErr } = await sb.from('trips').upsert(tripRow, { onConflict: 'id' });
+    const { error: upErr } = await withTimeout(
+      sb.from('trips').upsert(tripRow, { onConflict: 'id' }),
+      15000,
+      'Saving trip'
+    );
     if (upErr) throw new Error(upErr.message);
 
     if (Array.isArray(trip.optimised) && trip.optimised.length) {
@@ -351,7 +364,11 @@
         }
       }
     } else if (Array.isArray(trip.stopList) && trip.stopList.length) {
-      const { count } = await sb.from('stops').select('id', { count: 'exact', head: true }).eq('trip_id', trip.id);
+      const { count } = await withTimeout(
+        sb.from('stops').select('id', { count: 'exact', head: true }).eq('trip_id', trip.id),
+        10000,
+        'Checking existing stops'
+      );
       if (!count) {
         const rows = trip.stopList.map((pc, i) => ({
           trip_id: trip.id,
@@ -360,12 +377,42 @@
           postcode: pc,
           status: 'pending',
         }));
-        const { error: insErr } = await sb.from('stops').insert(rows);
+        const { error: insErr } = await withTimeout(
+          sb.from('stops').insert(rows),
+          20000,
+          `Saving ${rows.length} stops`
+        );
         if (insErr) throw new Error(insErr.message);
       }
     }
 
-    await refreshAll();
+    // Optimistically inject the trip into in-memory state so the next page
+    // can resolve it via getTrip(id) immediately. refreshAll will reconcile
+    // shortly with the canonical row from Postgres. Carry stopList/optimised
+    // forward so page-optimise can feed the optimiser without waiting.
+    const placeholder = {
+      id: trip.id,
+      name: trip.name,
+      mode: trip.mode || 'hybrid',
+      status: trip.status || 'draft',
+      startTime: trip.startTime || '',
+      endTime: trip.endTime || '',
+      date: trip.date || new Date().toISOString(),
+      stops: Array.isArray(trip.stopList) ? trip.stopList.length : (trip.stops || 0),
+      stopList: Array.isArray(trip.stopList) ? trip.stopList : [],
+      optimised: Array.isArray(trip.optimised) ? trip.optimised : [],
+      totalDistance: Number(trip.totalDistance || 0),
+      timeSaved: Number(trip.timeSaved || 0),
+      totalTime: Number(trip.totalTime || 0),
+      completedAt: trip.completedAt || null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    trips = [placeholder, ...trips.filter((t) => t.id !== trip.id)];
+    emit('store-changed');
+    // refreshAll is a best-effort UI sync; do not let it block the caller
+    // if a realtime/network hiccup makes the follow-up SELECTs slow.
+    withTimeout(refreshAll(), 8000, 'Refresh').catch(() => {});
     return getTrip(trip.id);
   }
 
