@@ -262,18 +262,35 @@
     realtimeChannels = [];
   }
 
+  // Debounced refresh: when bulk operations fire many postgres_changes events
+  // (e.g. inserting 25 stops triggers 25 events), we coalesce into a single
+  // refreshAll after a quiet period. Without this, the realtime callbacks
+  // create a stampede that competes with the user's own writes for the
+  // browser's per-host HTTP connection pool - and on slow networks, the
+  // user's saveTrip can sit queued behind 50+ refresh SELECTs.
+  let refreshDebounceTimer = null;
+  function scheduleRefresh() {
+    if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
+    refreshDebounceTimer = setTimeout(() => {
+      refreshDebounceTimer = null;
+      refreshAll().catch((e) => console.warn('[RF] debounced refresh failed', e));
+    }, 400);
+  }
+
   function setupChannels(userId) {
     teardownChannels();
     const uidFilter = `user_id=eq.${userId}`;
     realtimeChannels.push(
       sb.channel('rf:trips:' + userId)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'trips', filter: uidFilter }, () => refreshAll())
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'stops', filter: uidFilter }, () => refreshAll())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'trips', filter: uidFilter }, scheduleRefresh)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'stops', filter: uidFilter }, scheduleRefresh)
         .subscribe()
     );
     realtimeChannels.push(
       sb.channel('rf:activity:' + userId)
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity', filter: uidFilter }, (payload) => {
+          // Activity is append-only and we already have the row in the
+          // payload, so we don't need a refresh - just splice it in locally.
           const a = payload.new;
           if (!activity.find((x) => x.id === a.id)) {
             activity = [{
