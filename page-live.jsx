@@ -161,6 +161,39 @@ function LivePage({ navigate, params }) {
     window.open(url, '_blank', 'noopener,noreferrer');
   }
 
+  // Adaptive traffic-aware re-decide on each delivery / current-stop change.
+  // Calls Routes API v2 with TRAFFIC_AWARE_OPTIMAL via store.js. We only run
+  // when we have a real GPS fix (avoids spurious suggestions during the demo
+  // simulation tick) and when the next stop has coordinates.
+  // CRITICAL: this hook must live ABOVE any early `return` so the hook call
+  // order is stable between loading/ready renders (Rules of Hooks).
+  React.useEffect(() => {
+    if (loadState !== 'ready') return;
+    const c = stops[current];
+    if (!c || !me || me.source !== 'gps' || c.latitude == null) return;
+    // Find the active park anchor inline (mirrors the activeParkAnchor IIFE
+    // below, kept self-contained so we can run before that constant is defined).
+    let anchor = null;
+    if ((c.clusterSize || 1) > 1) {
+      if (c.isParkAnchor) anchor = c;
+      else for (let i = current; i >= 0; i--) {
+        if (stops[i].clusterId === c.clusterId && stops[i].isParkAnchor) { anchor = stops[i]; break; }
+      }
+    }
+    let cancelled = false;
+    const van = anchor && anchor.latitude != null
+      ? { lat: Number(anchor.latitude), lng: Number(anchor.longitude) }
+      : null;
+    RF.decideMode({
+      from: { lat: me.lat, lng: me.lng },
+      van,
+      to: { lat: Number(c.latitude), lng: Number(c.longitude) },
+    })
+      .then((res) => { if (!cancelled) setDecision(res); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [current, stops, me?.source, loadState]);
+
   if (loadState !== 'ready' || !trip) {
     let title, body, primary;
     if (loadState === 'no-trip-id') {
@@ -249,27 +282,6 @@ function LivePage({ navigate, params }) {
     if (kg < 18 && walkSec < 60) return null;
     return { kg, walkSec };
   })();
-
-  // Adaptive traffic-aware re-decide on each delivery / current-stop change.
-  // Calls Routes API v2 with TRAFFIC_AWARE_OPTIMAL via store.js. We only run
-  // when we have a real GPS fix (avoids spurious suggestions during the demo
-  // simulation tick) and when the next stop has coordinates.
-  React.useEffect(() => {
-    if (!cur || !me || me.source !== 'gps') return;
-    if (cur.latitude == null) return;
-    let cancelled = false;
-    const van = activeParkAnchor && activeParkAnchor.latitude != null
-      ? { lat: Number(activeParkAnchor.latitude), lng: Number(activeParkAnchor.longitude) }
-      : null;
-    RF.decideMode({
-      from: { lat: me.lat, lng: me.lng },
-      van,
-      to: { lat: Number(cur.latitude), lng: Number(cur.longitude) },
-    })
-      .then((res) => { if (!cancelled) setDecision(res); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [current, cur?.id, me?.source]);
 
   // Did the live decision flip the planned mode? (Only flag meaningful
   // savings: at least 45s difference, otherwise it's noise.)
