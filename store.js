@@ -637,22 +637,37 @@
     }));
   }
 
+  // PostgREST can't auto-embed profiles via the trips/activity FK (those
+  // target auth.users, not public.profiles). So we fetch driver info in a
+  // second query and merge in JS.
+  async function fetchDriverMap(userIds) {
+    const ids = Array.from(new Set(userIds.filter(Boolean)));
+    if (!ids.length) return {};
+    const { data } = await sb.from('profiles').select('id, full_name, email, role').in('id', ids);
+    return (data || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+  }
+
   async function adminFetchAllTrips(limit = 50) {
     requireAdmin();
     const { data: rows, error } = await sb
       .from('trips')
-      .select('*, profiles!inner(full_name, email)')
+      .select('*')
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) throw new Error(error.message);
     if (!rows?.length) return [];
     const ids = rows.map((t) => t.id);
-    const { data: stopRows } = await sb.from('stops').select('*').in('trip_id', ids).order('sequence', { ascending: true });
+    const [stopRowsResp, drivers] = await Promise.all([
+      sb.from('stops').select('*').in('trip_id', ids).order('sequence', { ascending: true }),
+      fetchDriverMap(rows.map((t) => t.user_id)),
+    ]);
+    const stopRows = stopRowsResp.data;
     const stopsByTrip = (stopRows || []).reduce((acc, s) => { (acc[s.trip_id] ||= []).push(s); return acc; }, {});
     return rows.map((r) => {
       const t = dbTrip(r, stopsByTrip[r.id]);
-      t.driverName = r.profiles?.full_name || 'Unknown';
-      t.driverEmail = r.profiles?.email || null;
+      const driver = drivers[r.user_id];
+      t.driverName = driver?.full_name || 'Unknown';
+      t.driverEmail = driver?.email || null;
       t.userId = r.user_id;
       return t;
     });
@@ -662,10 +677,11 @@
     requireAdmin();
     const { data, error } = await sb
       .from('activity')
-      .select('id, type, title, meta, trip_id, user_id, created_at, profiles!inner(full_name, email)')
+      .select('id, type, title, meta, trip_id, user_id, created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) throw new Error(error.message);
+    const drivers = await fetchDriverMap((data || []).map((a) => a.user_id));
     return (data || []).map((a) => ({
       id: a.id,
       type: a.type,
@@ -673,8 +689,8 @@
       meta: a.meta,
       tripId: a.trip_id,
       userId: a.user_id,
-      driverName: a.profiles?.full_name || 'Unknown',
-      driverEmail: a.profiles?.email || null,
+      driverName: drivers[a.user_id]?.full_name || 'Unknown',
+      driverEmail: drivers[a.user_id]?.email || null,
       ts: a.created_at,
     }));
   }
