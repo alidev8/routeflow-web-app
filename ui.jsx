@@ -164,7 +164,7 @@ async function runWithConcurrency(items, limit, worker) {
 }
 
 // --- Real map (Google Maps JS API) ---
-function RouteMap({ stops = [], current = -1, me = null, parkAnchor = null, parkRadiusMin = 0, height = 320, withLabels = false, interactive = true }) {
+function RouteMap({ stops = [], current = -1, me = null, parkAnchor = null, parkRadiusMin = 0, parkRadiusM = 0, height = 320, withLabels = false, interactive = true }) {
   const ref = React.useRef(null);
   const mapRef = React.useRef(null);
   const markersRef = React.useRef([]);
@@ -359,9 +359,12 @@ function RouteMap({ stops = [], current = -1, me = null, parkAnchor = null, park
       title: `Parked van - ${parkAnchor.postcode}`,
       zIndex: 750,
     });
-    if (parkRadiusMin > 0) {
-      // ~80 m per walking minute (1.3 m/s). Pad slightly for visual hint.
-      const radiusM = Math.max(120, Math.round(parkRadiusMin * 80 * 1.1));
+    if (parkRadiusM > 0 || parkRadiusMin > 0) {
+      // Prefer the real metre value when the edge fn supplied it; otherwise
+      // approximate from minutes (~80 m per walking minute @ 1.3 m/s, padded).
+      const radiusM = parkRadiusM > 0
+        ? Math.max(60, Math.round(parkRadiusM * 1.1))
+        : Math.max(120, Math.round(parkRadiusMin * 80 * 1.1));
       parkCircleRef.current = new maps.Circle({
         center: pos, radius: radiusM, map,
         fillColor: '#FF9F0A', fillOpacity: 0.08,
@@ -369,7 +372,7 @@ function RouteMap({ stops = [], current = -1, me = null, parkAnchor = null, park
         clickable: false,
       });
     }
-  }, [parkAnchor, parkRadiusMin]);
+  }, [parkAnchor, parkRadiusMin, parkRadiusM]);
 
   // Driver position marker
   React.useEffect(() => {

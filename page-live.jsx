@@ -246,11 +246,14 @@ function LivePage({ navigate, params }) {
     return null;
   })();
 
-  // Walking radius for the active cluster - take the worst walk_from_park_min
+  // Walking radius for the active cluster - take the worst walk_from_park
   // across walking stops in the cluster. Falls back to 0 when the backend
   // hasn't shipped the per-stop walk distance yet (older edge fn version).
   const parkRadiusMin = activeParkAnchor
     ? Math.max(0, ...stops.filter((s) => s.clusterId === activeParkAnchor.clusterId).map((s) => s.walkFromParkMin || 0))
+    : 0;
+  const parkRadiusM = activeParkAnchor
+    ? Math.max(0, ...stops.filter((s) => s.clusterId === activeParkAnchor.clusterId).map((s) => s.walkFromParkM || 0))
     : 0;
 
   // Last walking stop in the current cluster? After this drop the driver
@@ -330,8 +333,10 @@ function LivePage({ navigate, params }) {
       return `Park here — ${cur.clusterSize - 1} more drop${cur.clusterSize - 1 === 1 ? '' : 's'} are on foot from this spot.`;
     }
     if (cur.mode === 'walking' && activeParkAnchor) {
-      const m = cur.walkFromParkMin > 0 ? ` (~${cur.walkFromParkMin} min from the van)` : '';
-      return `Walking leg — same cluster as your last drop${m}, faster than re-parking.`;
+      const fromVan = cur.walkFromParkM > 0
+        ? ` (~${cur.walkFromParkM} m from the van)`
+        : cur.walkFromParkMin > 0 ? ` (~${cur.walkFromParkMin} min from the van)` : '';
+      return `Walking leg — same cluster as your last drop${fromVan}, faster than re-parking.`;
     }
     if (cur.mode === 'driving') {
       const km = Number(cur.distanceFromPrevious || 0);
@@ -355,6 +360,7 @@ function LivePage({ navigate, params }) {
       .filter((s) => s !== cur)
       .reduce((a, s) => a + (Number(s.selectedTime) || Number(s.walkingTime) || 0), 0);
     const maxWalkFromVan = Math.max(0, ...inCluster.map((s) => s.walkFromParkMin || 0));
+    const maxWalkFromVanM = Math.max(0, ...inCluster.map((s) => s.walkFromParkM || 0));
     // Next driving stop after the cluster (the one that breaks clusterId)
     const lastIdx = stops.lastIndexOf(inCluster[inCluster.length - 1]);
     const nextDrive = stops[lastIdx + 1];
@@ -362,6 +368,7 @@ function LivePage({ navigate, params }) {
       drops: inCluster.length,
       onFootMin,
       maxWalkFromVan,
+      maxWalkFromVanM,
       nextDriveMin: nextDrive ? Number(nextDrive.drivingTime || nextDrive.selectedTime || 0) : 0,
       nextPostcode: nextDrive?.postcode || null,
     };
@@ -531,6 +538,7 @@ function LivePage({ navigate, params }) {
           me={me}
           parkAnchor={activeParkAnchor}
           parkRadiusMin={parkRadiusMin}
+          parkRadiusM={parkRadiusM}
           height="100%"
         />
       </div>
@@ -648,7 +656,9 @@ function LivePage({ navigate, params }) {
                   <div className="fw-700" style={{ fontSize: 14 }}>Park here</div>
                   <div className="text-xs text-secondary">
                     {cur.clusterSize - 1} more drop{cur.clusterSize - 1 === 1 ? '' : 's'} on foot
-                    {parkRadiusMin > 0 ? ` within ~${parkRadiusMin} min walk` : ' nearby'}.
+                    {parkRadiusM > 0
+                      ? ` within ~${parkRadiusM} m`
+                      : parkRadiusMin > 0 ? ` within ~${parkRadiusMin} min walk` : ' nearby'}.
                     {' '}Loop back to the van after the last drop.
                   </div>
                 </div>
@@ -668,7 +678,9 @@ function LivePage({ navigate, params }) {
                 <div className="text-sm" style={{ lineHeight: 1.5 }}>
                   <b>{clusterPreview.drops} drops</b> walked from this spot
                   {clusterPreview.onFootMin > 0 && <> · <b>~{clusterPreview.onFootMin} min</b> on foot total</>}
-                  {clusterPreview.maxWalkFromVan > 0 && <> · furthest is ~{clusterPreview.maxWalkFromVan} min from the van</>}
+                  {clusterPreview.maxWalkFromVanM > 0
+                    ? <> · furthest is ~{clusterPreview.maxWalkFromVanM} m from the van</>
+                    : clusterPreview.maxWalkFromVan > 0 ? <> · furthest is ~{clusterPreview.maxWalkFromVan} min from the van</> : null}
                   {clusterPreview.nextPostcode && (
                     <> · then drive {clusterPreview.nextDriveMin > 0 ? `~${clusterPreview.nextDriveMin} min ` : ''}to <b className="mono">{clusterPreview.nextPostcode}</b></>
                   )}
@@ -692,7 +704,9 @@ function LivePage({ navigate, params }) {
                   <div className="fw-700" style={{ fontSize: 13 }}>Walking from your van</div>
                   <div className="text-xs text-secondary">
                     Van parked at <b>{activeParkAnchor.postcode}</b>
-                    {cur.walkFromParkMin > 0 && <> · ~{cur.walkFromParkMin}m walk from there</>}
+                    {cur.walkFromParkM > 0
+                      ? <> · ~{cur.walkFromParkM} m walk from there</>
+                      : cur.walkFromParkMin > 0 ? <> · ~{cur.walkFromParkMin} min walk from there</> : null}
                     {liveVanDistanceM != null && <> · <b>{liveVanDistanceM < 1000 ? `${liveVanDistanceM} m` : `${(liveVanDistanceM/1000).toFixed(2)} km`}</b> away now</>}
                   </div>
                 </div>
