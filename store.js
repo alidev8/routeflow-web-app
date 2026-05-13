@@ -58,8 +58,8 @@
 
   // ---------- DB <-> view-model mappers ----------
   function parseClusterMeta(notes) {
-    // Edge fn encodes hybrid metadata as "__rf:park_anchor=true;cluster_size=4;walk_from_park_min=3;walk_from_park_m=85;weight_kg=12"
-    const out = { isParkAnchor: false, clusterSize: 1, walkFromParkMin: 0, walkFromParkM: 0, weightKg: 0 };
+    // Edge fn encodes hybrid metadata as "__rf:park_anchor=true;cluster_size=4;walk_from_park_min=3;walk_from_park_m=85;approximate=true;weight_kg=12"
+    const out = { isParkAnchor: false, clusterSize: 1, walkFromParkMin: 0, walkFromParkM: 0, approximate: false, weightKg: 0 };
     if (!notes || !notes.startsWith('__rf:')) return out;
     const body = notes.slice(5);
     body.split(';').forEach((kv) => {
@@ -68,6 +68,7 @@
       if (k === 'cluster_size') out.clusterSize = Math.max(1, parseInt(v, 10) || 1);
       if (k === 'walk_from_park_min') out.walkFromParkMin = Math.max(0, parseInt(v, 10) || 0);
       if (k === 'walk_from_park_m') out.walkFromParkM = Math.max(0, parseInt(v, 10) || 0);
+      if (k === 'approximate' && v === 'true') out.approximate = true;
       if (k === 'weight_kg') out.weightKg = Math.max(0, parseFloat(v) || 0);
     });
     return out;
@@ -78,6 +79,7 @@
     if (meta.clusterSize > 1) parts.push('cluster_size=' + meta.clusterSize);
     if (meta.walkFromParkMin > 0) parts.push('walk_from_park_min=' + meta.walkFromParkMin);
     if (meta.walkFromParkM > 0) parts.push('walk_from_park_m=' + meta.walkFromParkM);
+    if (meta.approximate) parts.push('approximate=true');
     if (meta.weightKg > 0) parts.push('weight_kg=' + meta.weightKg);
     return parts.length ? '__rf:' + parts.join(';') : null;
   }
@@ -94,6 +96,7 @@
       isParkAnchor: meta.isParkAnchor,
       walkFromParkMin: meta.walkFromParkMin,
       walkFromParkM: meta.walkFromParkM,
+      approximate: meta.approximate,
       weightKg: meta.weightKg,
       mode: s.mode,
       latitude: s.latitude != null ? Number(s.latitude) : null,
@@ -684,7 +687,10 @@
   }
 
   // ---------- Optimisation (Edge Function) ----------
-  async function optimiseRoute(stopList, mode = 'hybrid', onProgress, tripId) {
+  // `origin` is an optional {lat, lng}. When present (e.g., driver's live
+  // GPS), the edge fn starts the drive route at the cluster nearest origin
+  // instead of the cluster containing the first input postcode.
+  async function optimiseRoute(stopList, mode = 'hybrid', onProgress, tripId, origin = null) {
     if (!tripId) throw new Error('tripId is required');
     // Use the cached access token directly. Going through sb.auth.getSession()
     // can hang on the SDK's refresh path (same root cause as the saveTrip
@@ -713,7 +719,12 @@
           'apikey': SUPABASE_ANON_KEY,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ stops: stopList, mode, tripId }),
+        body: JSON.stringify({
+          stops: stopList, mode, tripId,
+          ...(origin && typeof origin.lat === 'number' && typeof origin.lng === 'number'
+            ? { origin: { lat: origin.lat, lng: origin.lng } }
+            : {}),
+        }),
         signal: ctl.signal,
       });
       raw = await resp.text();
@@ -745,6 +756,7 @@
       isParkAnchor: !!s.is_park_anchor,
       walkFromParkMin: Number(s.walk_from_park_min || 0),
       walkFromParkM: Number(s.walk_from_park_m || 0),
+      approximate: !!s.approximate,
       weightKg: Number(s.weight_kg || 0),
       mode: s.mode,
       latitude: Number(s.latitude),

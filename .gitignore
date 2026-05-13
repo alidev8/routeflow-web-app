@@ -35,3 +35,7 @@ yarn-error.log*
 Thumbs.db
 
 .vercel
+
+# Local E2E test scripts (may contain API keys, do not commit)
+test-*.mjs
+test-screenshots/
