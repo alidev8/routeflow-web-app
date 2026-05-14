@@ -777,14 +777,24 @@
     // background refreshAll. This is what was causing "No active stop" on
     // the live page after optimise: the user navigated faster than the
     // refreshAll round-trip.
+    // Also lift the headline totals from the response so the route-preview
+    // banner shows the real time-saved figure straight away; the local sum
+    // over stops doesn't see the parking-buffer savings baked into the
+    // edge fn's drive-only baseline.
     const idx = trips.findIndex((t) => t.id === tripId);
     if (idx >= 0) {
+      const respKm = Number(data.total_distance_km);
+      const respMin = Number(data.total_time_min);
+      const respSaved = Number(data.time_saved_min);
       trips[idx] = {
         ...trips[idx],
         status: 'optimised',
         optimised: mapped,
-        totalDistance: mapped.reduce((a, s) => a + (Number(s.distanceFromPrevious) || 0), 0),
-        totalTime: mapped.reduce((a, s) => a + (Number(s.selectedTime) || 0), 0),
+        totalDistance: Number.isFinite(respKm) ? respKm
+          : mapped.reduce((a, s) => a + (Number(s.distanceFromPrevious) || 0), 0),
+        totalTime: Number.isFinite(respMin) ? respMin
+          : mapped.reduce((a, s) => a + (Number(s.selectedTime) || 0), 0),
+        timeSaved: Number.isFinite(respSaved) ? respSaved : 0,
       };
       emit('store-changed');
     }
